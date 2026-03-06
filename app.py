@@ -12,7 +12,7 @@ app.config["SESSION_PERMANENT"] = False
 app.config["TEMPLATES_AUTO_RELOAD"] = False
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-DB_NAME = os.environ.get("DB_NAME", "mini_pronote.db")
+DB_NAME = "mini_pronote_v2.db"
 
 
 # =========================
@@ -1394,3 +1394,4 @@ if __name__ == "__main__":
     init_db()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
