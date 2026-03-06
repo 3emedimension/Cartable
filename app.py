@@ -584,7 +584,7 @@ def register():
         <div id='class_block'>
           <label>Classe (élève / professeur)</label>
           <select name='class_id'>
-            <option value=''>Aucune</option>
+            <option value='parent'>Parent</option>
             {% for c in classes %}
               <option value='{{ c.id }}'>{{ c.name }}</option>
             {% endfor %}
@@ -594,7 +594,7 @@ def register():
         <div id='child_block' style='display:none;'>
           <label>Enfant lié (si parent)</label>
           <select name='child_id'>
-            <option value=''>Aucun</option>
+            <option value='parent'>Parent</option>
             {% for s in students %}
               <option value='{{ s.id }}'>{{ s.full_name }}</option>
             {% endfor %}
@@ -1635,3 +1635,4 @@ with app.app_context():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
