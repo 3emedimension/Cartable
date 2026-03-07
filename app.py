@@ -3,8 +3,19 @@ import sqlite3
 from datetime import datetime
 from functools import wraps
 
-from flask import Flask, flash, redirect, render_template_string, request, session, url_for, g
+from flask import (
+    Flask,
+    flash,
+    redirect,
+    render_template_string,
+    request,
+    session,
+    url_for,
+    g,
+    send_from_directory,
+)
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 
 try:
     import psycopg2
@@ -21,8 +32,17 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 USE_POSTGRES = bool(DATABASE_URL and psycopg2)
-DB_NAME = "mini_pronote_v6.db"
+DB_NAME = "mini_pronote_v7.db"
 ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Azsqerfd2012")
+
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+ALLOWED_EXTENSIONS = {
+    "pdf", "png", "jpg", "jpeg", "gif", "webp",
+    "doc", "docx", "txt", "zip", "rar", "ppt", "pptx",
+    "xls", "xlsx"
+}
 
 
 # =========================
@@ -120,6 +140,17 @@ def table_has_column(table_name, column_name):
         conn.close()
 
 
+def allowed_file(filename: str) -> bool:
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def unique_filename(filename: str) -> str:
+    base = secure_filename(filename)
+    name, ext = os.path.splitext(base)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    return f"{name}_{timestamp}{ext}"
+
+
 def init_db():
     conn = get_conn()
     try:
@@ -174,6 +205,7 @@ def init_db():
                     title TEXT NOT NULL,
                     description TEXT NOT NULL,
                     due_date TEXT NOT NULL,
+                    attachment TEXT,
                     created_at TEXT NOT NULL
                 )
             """)
@@ -268,6 +300,7 @@ def init_db():
                     title TEXT NOT NULL,
                     description TEXT NOT NULL,
                     due_date TEXT NOT NULL,
+                    attachment TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(class_id) REFERENCES classes(id),
                     FOREIGN KEY(subject_id) REFERENCES subjects(id),
@@ -326,6 +359,8 @@ def init_db():
         execute_db("ALTER TABLE users ADD COLUMN child_id INTEGER")
     if not table_has_column("users", "child_id_2"):
         execute_db("ALTER TABLE users ADD COLUMN child_id_2 INTEGER")
+    if not table_has_column("homework", "attachment"):
+        execute_db("ALTER TABLE homework ADD COLUMN attachment TEXT")
 
     if query_one("SELECT COUNT(*) AS total FROM classes")["total"] == 0:
         executemany_db(
@@ -983,6 +1018,12 @@ def add_grade():
 # =========================
 # Devoirs
 # =========================
+@app.route("/uploads/<path:filename>")
+@login_required
+def uploaded_file(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
+
 @app.route("/homework", methods=["GET", "POST"])
 @login_required
 def homework_page():
@@ -1002,8 +1043,18 @@ def homework_page():
             flash("Remplis tous les champs du devoir.")
             return redirect(url_for("homework_page"))
 
+        uploaded = request.files.get("attachment")
+        attachment_name = None
+
+        if uploaded and uploaded.filename:
+            if not allowed_file(uploaded.filename):
+                flash("Type de fichier non autorisé.")
+                return redirect(url_for("homework_page"))
+            attachment_name = unique_filename(uploaded.filename)
+            uploaded.save(os.path.join(UPLOAD_FOLDER, attachment_name))
+
         execute_db(
-            "INSERT INTO homework (class_id, subject_id, teacher_id, title, description, due_date, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO homework (class_id, subject_id, teacher_id, title, description, due_date, attachment, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 request.form.get("class_id") or None,
                 request.form.get("subject_id"),
@@ -1011,6 +1062,7 @@ def homework_page():
                 title,
                 description,
                 due_date,
+                attachment_name,
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
@@ -1065,7 +1117,7 @@ def homework_page():
       {% if user.role in ['prof', 'admin'] %}
       <div class='card'>
         <h2>Ajouter un devoir</h2>
-        <form method='post'>
+        <form method='post' enctype='multipart/form-data'>
           <label>Classe</label>
           <select name='class_id'><option value=''>Toutes les classes</option>{% for c in classes %}<option value='{{ c.id }}'>{{ c.name }}</option>{% endfor %}</select>
           <label>Matière</label>
@@ -1073,6 +1125,7 @@ def homework_page():
           <label>Titre</label><input name='title' required>
           <label>Description</label><textarea name='description' required></textarea>
           <label>Date limite</label><input type='date' name='due_date' required>
+          <label>Pièce jointe</label><input type='file' name='attachment'>
           <button type='submit'>Publier</button>
         </form>
       </div>
@@ -1084,6 +1137,9 @@ def homework_page():
             <div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'><strong>{{ item.title }}</strong><span class='badge'>{{ item.subject_name }}</span></div>
             <p>{{ item.description }}</p>
             <p class='muted'>Classe : {{ item.class_name or 'Toutes' }} · Professeur : {{ item.teacher_name }} · Date limite : {{ item.due_date }}</p>
+            {% if item.attachment %}
+              <p><a href='{{ url_for("uploaded_file", filename=item.attachment) }}' target='_blank'>Télécharger la pièce jointe</a></p>
+            {% endif %}
           </div>
         {% else %}<p>Aucun devoir.</p>{% endfor %}
       </div>
