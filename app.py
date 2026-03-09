@@ -1503,42 +1503,110 @@ def manage_users():
     students = query_all("SELECT id, full_name FROM users WHERE role='eleve' ORDER BY full_name")
 
     if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "").strip()
-        full_name = request.form.get("full_name", "").strip()
-        role = request.form.get("role", "").strip()
-        class_id = request.form.get("class_id") or None
-        child_id = request.form.get("child_id") or None
-        child_id_2 = request.form.get("child_id_2") or None
+        form_type = request.form.get("form_type", "").strip()
 
-        if not username or not password or not full_name or role not in ["admin", "prof", "eleve", "parent"]:
-            flash("Champs invalides.")
-            return redirect(url_for("manage_users"))
-        if user["role"] == "prof" and role == "admin":
-            flash("Un professeur ne peut pas créer un compte admin.")
-            return redirect(url_for("manage_users"))
-        if role == "parent" and not child_id and not child_id_2:
-            flash("Un parent doit être lié à au moins un élève.")
-            return redirect(url_for("manage_users"))
-        if child_id and child_id_2 and child_id == child_id_2:
-            flash("Tu ne peux pas choisir deux fois le même enfant.")
+        if form_type == "create":
+            username = request.form.get("username", "").strip()
+            password = request.form.get("password", "").strip()
+            full_name = request.form.get("full_name", "").strip()
+            role = request.form.get("role", "").strip()
+            class_id = request.form.get("class_id") or None
+            child_id = request.form.get("child_id") or None
+            child_id_2 = request.form.get("child_id_2") or None
+
+            if not username or not password or not full_name or role not in ["admin", "prof", "eleve", "parent"]:
+                flash("Champs invalides.")
+                return redirect(url_for("manage_users"))
+
+            if user["role"] == "prof" and role == "admin":
+                flash("Un professeur ne peut pas créer un compte admin.")
+                return redirect(url_for("manage_users"))
+
+            if role == "parent" and not child_id and not child_id_2:
+                flash("Un parent doit être lié à au moins un élève.")
+                return redirect(url_for("manage_users"))
+
+            if child_id and child_id_2 and child_id == child_id_2:
+                flash("Tu ne peux pas choisir deux fois le même enfant.")
+                return redirect(url_for("manage_users"))
+
+            if role == "parent":
+                class_id = None
+            else:
+                child_id = None
+                child_id_2 = None
+
+            try:
+                execute_db(
+                    "INSERT INTO users (username, password, role, full_name, class_id, child_id, child_id_2) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (username, generate_password_hash(password), role, full_name, class_id, child_id, child_id_2),
+                )
+                flash("Utilisateur ajouté.")
+            except Exception:
+                flash("Nom d'utilisateur déjà utilisé.")
+
             return redirect(url_for("manage_users"))
 
-        if role == "parent":
-            class_id = None
-        else:
-            child_id = None
-            child_id_2 = None
+        elif form_type == "update":
+            target_user_id = request.form.get("user_id")
+            new_class_id = request.form.get("edit_class_id") or None
+            new_child_id = request.form.get("edit_child_id") or None
+            new_child_id_2 = request.form.get("edit_child_id_2") or None
 
-        try:
-            execute_db(
-                "INSERT INTO users (username, password, role, full_name, class_id, child_id, child_id_2) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (username, generate_password_hash(password), role, full_name, class_id, child_id, child_id_2),
-            )
-            flash("Utilisateur ajouté.")
-        except Exception:
-            flash("Nom d'utilisateur déjà utilisé.")
-        return redirect(url_for("manage_users"))
+            target_user = query_one("SELECT * FROM users WHERE id = ?", (target_user_id,))
+            if not target_user:
+                flash("Utilisateur introuvable.")
+                return redirect(url_for("manage_users"))
+
+            if target_user["role"] == "admin" and user["role"] != "admin":
+                flash("Seul l'admin peut modifier un compte admin.")
+                return redirect(url_for("manage_users"))
+
+            if target_user["role"] == "parent":
+                if not new_child_id and not new_child_id_2:
+                    flash("Un parent doit être lié à au moins un élève.")
+                    return redirect(url_for("manage_users"))
+
+                if new_child_id and new_child_id_2 and new_child_id == new_child_id_2:
+                    flash("Tu ne peux pas choisir deux fois le même enfant.")
+                    return redirect(url_for("manage_users"))
+
+                execute_db(
+                    "UPDATE users SET class_id = NULL, child_id = ?, child_id_2 = ? WHERE id = ?",
+                    (new_child_id, new_child_id_2, target_user_id),
+                )
+            else:
+                execute_db(
+                    "UPDATE users SET class_id = ?, child_id = NULL, child_id_2 = NULL WHERE id = ?",
+                    (new_class_id, target_user_id),
+                )
+
+            flash("Utilisateur modifié.")
+            return redirect(url_for("manage_users"))
+
+        elif form_type == "delete":
+            target_user_id = request.form.get("user_id")
+            target_user = query_one("SELECT * FROM users WHERE id = ?", (target_user_id,))
+
+            if not target_user:
+                flash("Utilisateur introuvable.")
+                return redirect(url_for("manage_users"))
+
+            if str(target_user["username"]) == "admin":
+                flash("Impossible de supprimer le compte admin.")
+                return redirect(url_for("manage_users"))
+
+            if str(target_user["id"]) == str(user["id"]):
+                flash("Tu ne peux pas supprimer ton propre compte pendant que tu es connecté.")
+                return redirect(url_for("manage_users"))
+
+            if target_user["role"] == "admin" and user["role"] != "admin":
+                flash("Seul l'admin peut supprimer un compte admin.")
+                return redirect(url_for("manage_users"))
+
+            execute_db("DELETE FROM users WHERE id = ?", (target_user_id,))
+            flash("Utilisateur supprimé.")
+            return redirect(url_for("manage_users"))
 
     users = query_all(
         """
@@ -1557,6 +1625,7 @@ def manage_users():
       <div class='card'>
         <h1>Créer un compte</h1>
         <form method='post' autocomplete='off'>
+          <input type='hidden' name='form_type' value='create'>
           <label>Nom complet</label><input name='full_name' required>
           <label>Nom d'utilisateur</label><input name='username' required>
           <label>Mot de passe</label><input name='password' required>
@@ -1567,29 +1636,100 @@ def manage_users():
             <option value='parent'>Parent</option>
             {% if user.role == 'admin' %}<option value='admin'>Admin</option>{% endif %}
           </select>
+
           <div id='manage_class_block'>
             <label>Classe</label>
-            <select name='class_id'><option value=''>Aucune</option>{% for c in classes %}<option value='{{ c.id }}'>{{ c.name }}</option>{% endfor %}</select>
+            <select name='class_id'>
+              <option value=''>Aucune</option>
+              {% for c in classes %}<option value='{{ c.id }}'>{{ c.name }}</option>{% endfor %}
+            </select>
           </div>
+
           <div id='manage_child_block' style='display:none;'>
             <label>Enfant lié 1</label>
-            <select name='child_id'><option value=''>Aucun</option>{% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}</option>{% endfor %}</select>
+            <select name='child_id'>
+              <option value=''>Aucun</option>
+              {% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}</option>{% endfor %}
+            </select>
             <label>Enfant lié 2</label>
-            <select name='child_id_2'><option value=''>Aucun</option>{% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}</option>{% endfor %}</select>
+            <select name='child_id_2'>
+              <option value=''>Aucun</option>
+              {% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}</option>{% endfor %}
+            </select>
           </div>
+
           <button type='submit'>Créer</button>
         </form>
       </div>
+
       <div class='card'>
         <h2>Liste des utilisateurs</h2>
         <table>
-          <thead><tr><th>ID</th><th>Nom</th><th>Utilisateur</th><th>Rôle</th><th>Classe</th><th>Enfant lié 1</th><th>Enfant lié 2</th></tr></thead>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Nom</th>
+              <th>Utilisateur</th>
+              <th>Rôle</th>
+              <th>Classe</th>
+              <th>Enfant lié 1</th>
+              <th>Enfant lié 2</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
           <tbody>
-            {% for u in users %}<tr><td>{{ u.id }}</td><td>{{ u.full_name }}</td><td>{{ u.username }}</td><td>{{ u.role }}</td><td>{{ u.class_name or '-' }}</td><td>{{ u.child_name or '-' }}</td><td>{{ u.child_name_2 or '-' }}</td></tr>{% endfor %}
+            {% for u in users %}
+            <tr>
+              <td>{{ u.id }}</td>
+              <td>{{ u.full_name }}</td>
+              <td>{{ u.username }}</td>
+              <td>{{ u.role }}</td>
+              <td>{{ u.class_name or '-' }}</td>
+              <td>{{ u.child_name or '-' }}</td>
+              <td>{{ u.child_name_2 or '-' }}</td>
+              <td>
+                <form method='post' style='margin-bottom:8px;'>
+                  <input type='hidden' name='form_type' value='update'>
+                  <input type='hidden' name='user_id' value='{{ u.id }}'>
+
+                  {% if u.role != 'parent' %}
+                    <select name='edit_class_id'>
+                      <option value=''>Aucune</option>
+                      {% for c in classes %}
+                        <option value='{{ c.id }}' {% if u.class_name == c.name %}selected{% endif %}>{{ c.name }}</option>
+                      {% endfor %}
+                    </select>
+                  {% else %}
+                    <select name='edit_child_id'>
+                      <option value=''>Aucun</option>
+                      {% for s in students %}
+                        <option value='{{ s.id }}' {% if u.child_name == s.full_name %}selected{% endif %}>{{ s.full_name }}</option>
+                      {% endfor %}
+                    </select>
+                    <select name='edit_child_id_2'>
+                      <option value=''>Aucun</option>
+                      {% for s in students %}
+                        <option value='{{ s.id }}' {% if u.child_name_2 == s.full_name %}selected{% endif %}>{{ s.full_name }}</option>
+                      {% endfor %}
+                    </select>
+                  {% endif %}
+
+                  <button type='submit'>Modifier</button>
+                </form>
+
+                <form method='post' onsubmit="return confirm('Supprimer ce compte ?');">
+                  <input type='hidden' name='form_type' value='delete'>
+                  <input type='hidden' name='user_id' value='{{ u.id }}'>
+                  <button type='submit' class='danger'>Supprimer</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
           </tbody>
         </table>
       </div>
     </div>
+
     <script>
       function toggleManageFields() {
         const role = document.getElementById('manage_role_select').value;
@@ -1600,8 +1740,7 @@ def manage_users():
     </script>
     """
     return render_page(content, title="Comptes", users=users, user=user, classes=classes, students=students)
-
-
+    
 # =========================
 # École
 # =========================
@@ -1690,3 +1829,4 @@ with app.app_context():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
