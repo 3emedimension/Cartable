@@ -924,66 +924,112 @@ def grades():
     if user["role"] == "eleve":
         rows = query_all(
             """
-            SELECT g.id, g.value, g.comment, g.created_at, s.name AS subject_name, u.full_name AS teacher_name
-            FROM grades g JOIN subjects s ON s.id = g.subject_id JOIN users u ON u.id = g.teacher_id
-            WHERE g.student_id = ? ORDER BY g.id DESC
+            SELECT
+                g.id,
+                g.value,
+                g.comment,
+                g.created_at,
+                s.name AS subject_name,
+                u.full_name AS teacher_name
+            FROM grades g
+            JOIN subjects s ON s.id = g.subject_id
+            JOIN users u ON u.id = g.teacher_id
+            WHERE g.student_id = ?
+            ORDER BY g.id DESC
             """,
             (user["id"],),
         )
         averages = query_all(
             """
-            SELECT s.name AS subject_name, ROUND(AVG(g.value), 2) AS average_value
-            FROM grades g JOIN subjects s ON s.id = g.subject_id
-            WHERE g.student_id = ? GROUP BY s.name ORDER BY s.name
+            SELECT
+                s.name AS subject_name,
+                ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS average_value
+            FROM grades g
+            JOIN subjects s ON s.id = g.subject_id
+            WHERE g.student_id = ?
+            GROUP BY s.name
+            ORDER BY s.name
             """,
             (user["id"],),
         )
         show_student_col = False
+
     elif user["role"] == "parent":
         children = get_parent_children(user)
         if not children:
-            return render_page("<div class='card'><h1>Notes</h1><p>Aucun enfant lié à ce compte parent.</p></div>", title="Notes")
+            return render_page(
+                "<div class='card'><h1>Notes</h1><p>Aucun enfant lié à ce compte parent.</p></div>",
+                title="Notes",
+            )
+
         student_ids = [child["id"] for child in children]
         placeholders = ",".join(["?"] * len(student_ids))
+
         rows = query_all(
             f"""
-            SELECT g.id, g.value, g.comment, g.created_at, s.name AS subject_name,
-                   u.full_name AS teacher_name, stu.full_name AS student_name
+            SELECT
+                g.id,
+                g.value,
+                g.comment,
+                g.created_at,
+                s.name AS subject_name,
+                u.full_name AS teacher_name,
+                stu.full_name AS student_name
             FROM grades g
             JOIN subjects s ON s.id = g.subject_id
             JOIN users u ON u.id = g.teacher_id
             JOIN users stu ON stu.id = g.student_id
-            WHERE g.student_id IN ({placeholders}) ORDER BY g.id DESC
+            WHERE g.student_id IN ({placeholders})
+            ORDER BY stu.full_name, g.id DESC
             """,
             tuple(student_ids),
         )
         averages = query_all(
             f"""
-            SELECT stu.full_name AS student_name, s.name AS subject_name, ROUND(AVG(g.value), 2) AS average_value
-            FROM grades g JOIN users stu ON stu.id = g.student_id JOIN subjects s ON s.id = g.subject_id
+            SELECT
+                stu.full_name AS student_name,
+                s.name AS subject_name,
+                ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS average_value
+            FROM grades g
+            JOIN users stu ON stu.id = g.student_id
+            JOIN subjects s ON s.id = g.subject_id
             WHERE g.student_id IN ({placeholders})
-            GROUP BY stu.full_name, s.name ORDER BY stu.full_name, s.name
+            GROUP BY stu.full_name, s.name
+            ORDER BY stu.full_name, s.name
             """,
             tuple(student_ids),
         )
         show_student_col = True
+
     else:
         rows = query_all(
             """
-            SELECT g.id, g.value, g.comment, g.created_at, s.name AS subject_name,
-                   stu.full_name AS student_name, tea.full_name AS teacher_name
+            SELECT
+                g.id,
+                g.value,
+                g.comment,
+                g.created_at,
+                s.name AS subject_name,
+                stu.full_name AS student_name,
+                tea.full_name AS teacher_name
             FROM grades g
             JOIN subjects s ON s.id = g.subject_id
             JOIN users stu ON stu.id = g.student_id
             JOIN users tea ON tea.id = g.teacher_id
-            ORDER BY g.id DESC
+            ORDER BY stu.full_name, g.id DESC
             """
         )
         averages = query_all(
             """
-            SELECT stu.full_name AS student_name, s.name AS subject_name, ROUND(AVG(g.value), 2) AS average_value
-            FROM grades g JOIN users stu ON stu.id = g.student_id JOIN subjects s ON s.id = g.subject_id
-            GROUP BY stu.full_name, s.name ORDER BY stu.full_name, s.name
+            SELECT
+                stu.full_name AS student_name,
+                s.name AS subject_name,
+                ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS average_value
+            FROM grades g
+            JOIN users stu ON stu.id = g.student_id
+            JOIN subjects s ON s.id = g.subject_id
+            GROUP BY stu.full_name, s.name
+            ORDER BY stu.full_name, s.name
             """
         )
         show_student_col = True
