@@ -36,7 +36,8 @@ DB_NAME = "mini_pronote_v10.db"
 ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Azsqerfd2012")
 SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "EcoleR2026")
 
-UPLOAD_FOLDER = "uploads"
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 ALLOWED_EXTENSIONS = {
@@ -175,6 +176,19 @@ def unique_filename(filename: str) -> str:
     name, ext = os.path.splitext(base)
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     return f"{name}_{timestamp}{ext}"
+
+
+def get_safe_upload_path(filename: str):
+    if not filename:
+        return None, None
+    safe_name = os.path.basename(filename)
+    full_path = os.path.join(UPLOAD_FOLDER, safe_name)
+    return safe_name, full_path
+
+
+def file_exists_in_uploads(filename: str) -> bool:
+    safe_name, full_path = get_safe_upload_path(filename)
+    return bool(safe_name and full_path and os.path.isfile(full_path))
 
 
 def init_db():
@@ -1126,6 +1140,38 @@ def logout():
 
 
 # =========================
+# Fichiers / uploads
+# =========================
+@app.route("/uploads/<path:filename>")
+@login_required
+def uploaded_file(filename):
+    safe_name, full_path = get_safe_upload_path(filename)
+
+    if not safe_name or not full_path or not os.path.isfile(full_path):
+        flash("Fichier introuvable.")
+        return redirect(url_for("dashboard"))
+
+    return send_from_directory(UPLOAD_FOLDER, safe_name)
+
+
+@app.route("/download/<path:filename>")
+@login_required
+def download_file(filename):
+    safe_name, full_path = get_safe_upload_path(filename)
+
+    if not safe_name or not full_path or not os.path.isfile(full_path):
+        flash("Pièce jointe introuvable.")
+        return redirect(url_for("homework_page"))
+
+    return send_from_directory(
+        UPLOAD_FOLDER,
+        safe_name,
+        as_attachment=True,
+        download_name=safe_name
+    )
+
+
+# =========================
 # Profil
 # =========================
 @app.route("/profile", methods=["GET", "POST"])
@@ -1145,7 +1191,17 @@ def profile_page():
             return redirect(url_for("profile_page"))
 
         new_filename = unique_filename(uploaded.filename)
-        uploaded.save(os.path.join(UPLOAD_FOLDER, new_filename))
+        save_path = os.path.join(UPLOAD_FOLDER, new_filename)
+
+        try:
+            uploaded.save(save_path)
+        except Exception:
+            flash("Impossible d'enregistrer la photo de profil.")
+            return redirect(url_for("profile_page"))
+
+        if not os.path.isfile(save_path):
+            flash("La photo n'a pas pu être enregistrée.")
+            return redirect(url_for("profile_page"))
 
         execute_db(
             "UPDATE users SET profile_picture = ? WHERE id = ?",
@@ -1167,7 +1223,7 @@ def profile_page():
     content = """
     <div class='grid'>
       <div class='card' style='text-align:center;'>
-        {% if user.profile_picture %}
+        {% if user.profile_picture and file_exists_in_uploads(user.profile_picture) %}
           <img src='{{ url_for("uploaded_file", filename=user.profile_picture) }}' class='avatar-large' alt='Photo de profil'>
         {% else %}
           <div class='avatar-large' style='display:inline-flex; align-items:center; justify-content:center; color:#1d4ed8; font-size:34px; font-weight:800;'>
@@ -1189,7 +1245,7 @@ def profile_page():
       </div>
     </div>
     """
-    return render_page(content, title="Profil", user=refreshed_user)
+    return render_page(content, title="Profil", user=refreshed_user, file_exists_in_uploads=file_exists_in_uploads)
 
 
 # =========================
@@ -1297,7 +1353,16 @@ def general_info_page():
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    user = g.user
+    user = query_one(
+        """
+        SELECT u.*, c.name AS class_name
+        FROM users u
+        LEFT JOIN classes c ON c.id = u.class_id
+        WHERE u.id = ?
+        """,
+        (g.user["id"],),
+    )
+
     parent_children = get_parent_children(user)
     parent_child_names = ", ".join(child["full_name"] for child in parent_children)
 
@@ -1379,7 +1444,7 @@ def dashboard():
     content = """
     <div class='hero'>
       <div style='display:flex; align-items:center; gap:18px; flex-wrap:wrap;'>
-        {% if user.profile_picture %}
+        {% if user.profile_picture and file_exists_in_uploads(user.profile_picture) %}
           <img src='{{ url_for("uploaded_file", filename=user.profile_picture) }}' class='avatar' alt='Photo de profil'>
         {% else %}
           <div class='avatar' style='display:flex; align-items:center; justify-content:center; color:#1d4ed8; font-size:24px; font-weight:800;'>
@@ -1450,6 +1515,7 @@ def dashboard():
         latest_messages=latest_messages,
         parent_child_names=parent_child_names,
         general_infos=general_infos,
+        file_exists_in_uploads=file_exists_in_uploads,
     )
 
 
@@ -1658,12 +1724,6 @@ def add_grade():
 # =========================
 # Devoirs
 # =========================
-@app.route("/uploads/<path:filename>")
-@login_required
-def uploaded_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
-
 @app.route("/homework", methods=["GET", "POST"])
 @login_required
 def homework_page():
@@ -1687,11 +1747,27 @@ def homework_page():
         attachment_name = None
 
         if uploaded and uploaded.filename:
-            if not allowed_file(uploaded.filename):
+            original_name = secure_filename(uploaded.filename)
+            if not original_name:
+                flash("Nom de fichier invalide.")
+                return redirect(url_for("homework_page"))
+
+            if not allowed_file(original_name):
                 flash("Type de fichier non autorisé.")
                 return redirect(url_for("homework_page"))
-            attachment_name = unique_filename(uploaded.filename)
-            uploaded.save(os.path.join(UPLOAD_FOLDER, attachment_name))
+
+            attachment_name = unique_filename(original_name)
+            save_path = os.path.join(UPLOAD_FOLDER, attachment_name)
+
+            try:
+                uploaded.save(save_path)
+            except Exception:
+                flash("Erreur pendant l'enregistrement de la pièce jointe.")
+                return redirect(url_for("homework_page"))
+
+            if not os.path.isfile(save_path):
+                flash("Le fichier n'a pas pu être enregistré.")
+                return redirect(url_for("homework_page"))
 
         execute_db(
             "INSERT INTO homework (class_id, subject_id, teacher_id, title, description, due_date, attachment, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1778,14 +1854,26 @@ def homework_page():
             <p>{{ item.description }}</p>
             <p class='muted'>Classe : {{ item.class_name or 'Toutes' }} · Professeur : {{ item.teacher_name }} · Date limite : {{ item.due_date }}</p>
             {% if item.attachment %}
-              <p><a href='{{ url_for("uploaded_file", filename=item.attachment) }}' target='_blank'>Télécharger la pièce jointe</a></p>
+              {% if file_exists_in_uploads(item.attachment) %}
+                <p><a href='{{ url_for("download_file", filename=item.attachment) }}'>Télécharger la pièce jointe</a></p>
+              {% else %}
+                <p class='muted'><strong>Pièce jointe introuvable</strong></p>
+              {% endif %}
             {% endif %}
           </div>
         {% else %}<p>Aucun devoir.</p>{% endfor %}
       </div>
     </div>
     """
-    return render_page(content, title="Devoirs", user=user, items=items, subjects=subjects, classes=classes)
+    return render_page(
+        content,
+        title="Devoirs",
+        user=user,
+        items=items,
+        subjects=subjects,
+        classes=classes,
+        file_exists_in_uploads=file_exists_in_uploads,
+    )
 
 
 # =========================
@@ -1980,7 +2068,6 @@ def absences_page():
 def messages_page():
     user = g.user
 
-    # Corrigé : les élèves peuvent écrire à tous les autres utilisateurs, y compris aux autres élèves
     if user["role"] == "eleve":
         contacts = query_all(
             "SELECT id, full_name, role FROM users WHERE id != ? ORDER BY full_name",
@@ -2257,7 +2344,7 @@ def manage_users():
             <tr>
               <td>{{ u.id }}</td>
               <td>
-                {% if u.profile_picture %}
+                {% if u.profile_picture and file_exists_in_uploads(u.profile_picture) %}
                   <img src='{{ url_for("uploaded_file", filename=u.profile_picture) }}' class='avatar' alt='Photo'>
                 {% else %}
                   <div class='avatar' style='display:flex; align-items:center; justify-content:center; color:#1d4ed8; font-size:18px; font-weight:800;'>
@@ -2323,7 +2410,15 @@ def manage_users():
       toggleManageFields();
     </script>
     """
-    return render_page(content, title="Comptes", users=users, user=user, classes=classes, students=students)
+    return render_page(
+        content,
+        title="Comptes",
+        users=users,
+        user=user,
+        classes=classes,
+        students=students,
+        file_exists_in_uploads=file_exists_in_uploads,
+    )
 
 
 # =========================
