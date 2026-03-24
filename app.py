@@ -186,7 +186,6 @@ def is_image_file(filename: str) -> bool:
 
 
 def upload_to_cloudinary(file_storage, folder="pronote_uploads", resource_type="auto"):
-    """Upload a file to Cloudinary and return the public_id and secure_url."""
     try:
         result = cloudinary.uploader.upload(
             file_storage,
@@ -200,7 +199,6 @@ def upload_to_cloudinary(file_storage, folder="pronote_uploads", resource_type="
 
 
 def delete_from_cloudinary(public_id, resource_type="auto"):
-    """Delete a file from Cloudinary by public_id."""
     if not public_id:
         return
     try:
@@ -210,7 +208,6 @@ def delete_from_cloudinary(public_id, resource_type="auto"):
 
 
 def get_cloudinary_url(public_id, resource_type="auto"):
-    """Get the URL for a Cloudinary resource."""
     if not public_id:
         return None
     try:
@@ -223,11 +220,9 @@ def get_cloudinary_url(public_id, resource_type="auto"):
 
 
 def cloudinary_file_exists(public_id):
-    """Check if a file exists on Cloudinary."""
     if not public_id:
         return False
     try:
-        # public_id starts with folder/
         cloudinary.api.resource(public_id)
         return True
     except Exception:
@@ -310,6 +305,7 @@ def init_db():
                     student_id INTEGER NOT NULL REFERENCES users(id),
                     teacher_id INTEGER NOT NULL REFERENCES users(id),
                     absence_date TEXT NOT NULL,
+                    end_date TEXT,
                     reason TEXT,
                     status TEXT NOT NULL DEFAULT 'Non justifiée',
                     created_at TEXT NOT NULL
@@ -417,6 +413,7 @@ def init_db():
                     student_id INTEGER NOT NULL,
                     teacher_id INTEGER NOT NULL,
                     absence_date TEXT NOT NULL,
+                    end_date TEXT,
                     reason TEXT,
                     status TEXT NOT NULL DEFAULT 'Non justifiée',
                     created_at TEXT NOT NULL,
@@ -459,6 +456,10 @@ def init_db():
     for col in ["attachment", "attachment_url", "attachment_name"]:
         if not table_has_column("homework", col):
             execute_db(f"ALTER TABLE homework ADD COLUMN {col} TEXT")
+
+    # Migration: ajouter end_date aux absences si la colonne n'existe pas
+    if not table_has_column("absences", "end_date"):
+        execute_db("ALTER TABLE absences ADD COLUMN end_date TEXT")
 
     if not table_exists("general_info"):
         if USE_POSTGRES:
@@ -988,12 +989,10 @@ def profile_page():
             flash("Format image non autorisé.")
             return redirect(url_for("profile_page"))
 
-        # Supprimer l'ancienne photo sur Cloudinary
         old_user = query_one("SELECT profile_picture FROM users WHERE id = ?", (user["id"],))
         if old_user and old_user.get("profile_picture"):
             delete_from_cloudinary(old_user["profile_picture"], resource_type="image")
 
-        # Uploader la nouvelle photo
         public_id, secure_url = upload_to_cloudinary(
             uploaded,
             folder="pronote_profiles",
@@ -1966,7 +1965,7 @@ def schedule_page():
 
 
 # =========================
-# Absences
+# Absences  (modifié : champ end_date ajouté partout)
 # =========================
 @app.route("/absences", methods=["GET", "POST"])
 @login_required
@@ -1982,11 +1981,12 @@ def absences_page():
                 flash("Accès refusé.")
                 return redirect(url_for("absences_page"))
             execute_db(
-                "INSERT INTO absences (student_id, teacher_id, absence_date, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO absences (student_id, teacher_id, absence_date, end_date, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     request.form.get("student_id"),
                     user["id"],
                     request.form.get("absence_date"),
+                    request.form.get("end_date") or None,
                     request.form.get("reason", "").strip(),
                     request.form.get("status"),
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2001,10 +2001,11 @@ def absences_page():
                 return redirect(url_for("absences_page"))
             absence_id = request.form.get("absence_id")
             execute_db(
-                "UPDATE absences SET student_id = ?, absence_date = ?, reason = ?, status = ? WHERE id = ?",
+                "UPDATE absences SET student_id = ?, absence_date = ?, end_date = ?, reason = ?, status = ? WHERE id = ?",
                 (
                     request.form.get("student_id"),
                     request.form.get("absence_date"),
+                    request.form.get("end_date") or None,
                     request.form.get("reason", "").strip(),
                     request.form.get("status"),
                     absence_id,
@@ -2058,10 +2059,23 @@ def absences_page():
         <h2>Ajouter une absence</h2>
         <form method='post'>
           <input type='hidden' name='form_type' value='create'>
-          <label>Élève</label><select name='student_id' required>{% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}{% if s.class_name %} - {{ s.class_name }}{% endif %}</option>{% endfor %}</select>
-          <label>Date</label><input type='date' name='absence_date' required>
-          <label>Motif</label><textarea name='reason'></textarea>
-          <label>Statut</label><select name='status' required><option>Non justifiée</option><option>Justifiée</option></select>
+          <label>Élève</label>
+          <select name='student_id' required>
+            {% for s in students %}
+              <option value='{{ s.id }}'>{{ s.full_name }}{% if s.class_name %} - {{ s.class_name }}{% endif %}</option>
+            {% endfor %}
+          </select>
+          <label>Date début</label>
+          <input type='date' name='absence_date' required>
+          <label>Date fin</label>
+          <input type='date' name='end_date'>
+          <label>Motif</label>
+          <textarea name='reason'></textarea>
+          <label>Statut</label>
+          <select name='status' required>
+            <option>Non justifiée</option>
+            <option>Justifiée</option>
+          </select>
           <button type='submit'>Enregistrer</button>
         </form>
       </div>
@@ -2069,20 +2083,47 @@ def absences_page():
       <div class='card'>
         <h1>Absences</h1>
         <table>
-          <thead><tr>{% if user.role in ['admin','prof','parent'] %}<th>Élève</th><th>Classe</th>{% endif %}<th>Date</th><th>Motif</th><th>Statut</th><th>Déclarée par</th></tr></thead>
+          <thead>
+            <tr>
+              {% if user.role in ['admin','prof','parent'] %}<th>Élève</th><th>Classe</th>{% endif %}
+              <th>Date début</th>
+              <th>Date fin</th>
+              <th>Motif</th>
+              <th>Statut</th>
+              <th>Déclarée par</th>
+            </tr>
+          </thead>
           <tbody>
             {% for r in rows %}
-              <tr>{% if user.role in ['admin','prof','parent'] %}<td>{{ r.student_name }}</td><td>{{ r.class_name or '-' }}</td>{% endif %}<td>{{ r.absence_date }}</td><td>{{ r.reason or '-' }}</td><td>{{ r.status }}</td><td>{{ r.teacher_name }}</td></tr>
+              <tr>
+                {% if user.role in ['admin','prof','parent'] %}
+                  <td>{{ r.student_name }}</td>
+                  <td>{{ r.class_name or '-' }}</td>
+                {% endif %}
+                <td>{{ r.absence_date }}</td>
+                <td>{{ r.end_date or r.absence_date }}</td>
+                <td>{{ r.reason or '-' }}</td>
+                <td>{{ r.status }}</td>
+                <td>{{ r.teacher_name }}</td>
+              </tr>
               {% if user.role == 'admin' %}
-              <tr><td colspan='6'>
+              <tr><td colspan='7'>
                 <div class='admin-box'>
                   <form method='post'>
                     <input type='hidden' name='form_type' value='update'>
                     <input type='hidden' name='absence_id' value='{{ r.id }}'>
                     <label>Élève</label>
-                    <select name='student_id' required>{% for s in students %}<option value='{{ s.id }}' {% if r.student_id == s.id %}selected{% endif %}>{{ s.full_name }}</option>{% endfor %}</select>
-                    <label>Date</label><input type='date' name='absence_date' value='{{ r.absence_date }}' required>
-                    <label>Motif</label><textarea name='reason'>{{ r.reason or "" }}</textarea>
+                    <select name='student_id' required>
+                      {% for s in students %}
+                        <option value='{{ s.id }}' {% if r.student_id == s.id %}selected{% endif %}>{{ s.full_name }}</option>
+                      {% endfor %}
+                    </select>
+                    <label>Date début</label>
+                    <input type='date' name='absence_date' value='{{ r.absence_date }}' required>
+                    <label>Date fin</label>
+                    <input type='date' name='end_date' value='{{ r.end_date or "" }}'>
+                    <label>Motif</label>
+                    <textarea name='reason'>{{ r.reason or "" }}</textarea>
                     <label>Statut</label>
                     <select name='status' required>
                       <option value='Non justifiée' {% if r.status == 'Non justifiée' %}selected{% endif %}>Non justifiée</option>
@@ -2099,7 +2140,7 @@ def absences_page():
               </td></tr>
               {% endif %}
             {% else %}
-              <tr><td colspan='6'>Aucune absence.</td></tr>
+              <tr><td colspan='7'>Aucune absence.</td></tr>
             {% endfor %}
           </tbody>
         </table>
