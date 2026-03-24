@@ -2151,84 +2151,697 @@ def absences_page():
 
 
 # =========================
-# Messagerie
+# Messagerie style WhatsApp
 # =========================
+
+def init_chat_tables():
+    """Create group chat tables if they don't exist."""
+    if USE_POSTGRES:
+        execute_db("""
+            CREATE TABLE IF NOT EXISTS chat_groups (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            )
+        """)
+        execute_db("""
+            CREATE TABLE IF NOT EXISTS chat_group_members (
+                id SERIAL PRIMARY KEY,
+                group_id INTEGER NOT NULL REFERENCES chat_groups(id),
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                UNIQUE(group_id, user_id)
+            )
+        """)
+        execute_db("""
+            CREATE TABLE IF NOT EXISTS chat_group_messages (
+                id SERIAL PRIMARY KEY,
+                group_id INTEGER NOT NULL REFERENCES chat_groups(id),
+                sender_id INTEGER NOT NULL REFERENCES users(id),
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+    else:
+        execute_db("""
+            CREATE TABLE IF NOT EXISTS chat_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                created_by INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(created_by) REFERENCES users(id)
+            )
+        """)
+        execute_db("""
+            CREATE TABLE IF NOT EXISTS chat_group_members (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                UNIQUE(group_id, user_id),
+                FOREIGN KEY(group_id) REFERENCES chat_groups(id),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+        execute_db("""
+            CREATE TABLE IF NOT EXISTS chat_group_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                sender_id INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(group_id) REFERENCES chat_groups(id),
+                FOREIGN KEY(sender_id) REFERENCES users(id)
+            )
+        """)
+
+
 @app.route("/messages", methods=["GET", "POST"])
 @login_required
 def messages_page():
+    init_chat_tables()
     user = g.user
 
+    # Contacts selon le rôle
     if user["role"] == "eleve":
-        contacts = query_all("SELECT id, full_name, role FROM users WHERE id != ? ORDER BY full_name", (user["id"],))
+        contacts = query_all(
+            "SELECT id, full_name, role, profile_picture_url FROM users WHERE id != ? ORDER BY full_name",
+            (user["id"],)
+        )
     elif user["role"] == "parent":
         children = get_parent_children(user)
         child_ids = [child["id"] for child in children]
         if child_ids:
             placeholders = ",".join(["?"] * len(child_ids))
             contacts = query_all(
-                f"SELECT id, full_name, role FROM users WHERE (role IN ('prof', 'admin') OR id IN ({placeholders})) AND id != ? ORDER BY full_name",
+                f"SELECT id, full_name, role, profile_picture_url FROM users WHERE (role IN ('prof', 'admin') OR id IN ({placeholders})) AND id != ? ORDER BY full_name",
                 tuple(child_ids) + (user["id"],),
             )
         else:
-            contacts = query_all("SELECT id, full_name, role FROM users WHERE role IN ('prof', 'admin') ORDER BY full_name")
+            contacts = query_all(
+                "SELECT id, full_name, role, profile_picture_url FROM users WHERE role IN ('prof', 'admin') ORDER BY full_name"
+            )
     else:
-        contacts = query_all("SELECT id, full_name, role FROM users WHERE id != ? ORDER BY full_name", (user["id"],))
-
-    if request.method == "POST":
-        receiver_id = request.form.get("receiver_id")
-        subject = request.form.get("subject", "").strip()
-        body = request.form.get("body", "").strip()
-        if not receiver_id or not subject or not body:
-            flash("Remplis tous les champs du message.")
-            return redirect(url_for("messages_page"))
-        target_user = query_one("SELECT id FROM users WHERE id = ?", (receiver_id,))
-        if not target_user:
-            flash("Destinataire introuvable.")
-            return redirect(url_for("messages_page"))
-        execute_db(
-            "INSERT INTO messages (sender_id, receiver_id, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",
-            (user["id"], receiver_id, subject, body, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        contacts = query_all(
+            "SELECT id, full_name, role, profile_picture_url FROM users WHERE id != ? ORDER BY full_name",
+            (user["id"],)
         )
-        flash("Message envoyé.")
-        return redirect(url_for("messages_page"))
 
-    inbox = query_all(
+    # Groupes dont l'utilisateur est membre
+    my_groups = query_all(
         """
-        SELECT m.*, s.full_name AS sender_name, r.full_name AS receiver_name
-        FROM messages m JOIN users s ON s.id = m.sender_id JOIN users r ON r.id = m.receiver_id
-        WHERE m.receiver_id = ? OR m.sender_id = ?
-        ORDER BY m.id DESC
+        SELECT cg.id, cg.name, cg.created_by, cg.created_at
+        FROM chat_groups cg
+        JOIN chat_group_members cgm ON cgm.group_id = cg.id
+        WHERE cgm.user_id = ?
+        ORDER BY cg.id DESC
         """,
-        (user["id"], user["id"]),
+        (user["id"],)
     )
 
-    content = """
-    <div class='grid'>
-      <div class='card'>
-        <h2>Nouveau message</h2>
-        <form method='post'>
-          <label>Destinataire</label>
-          <select name='receiver_id' required>{% for c in contacts %}<option value='{{ c.id }}'>{{ c.full_name }} ({{ c.role }})</option>{% endfor %}</select>
-          <label>Sujet</label><input name='subject' required>
-          <label>Message</label><textarea name='body' required></textarea>
-          <button type='submit'>Envoyer</button>
-        </form>
-      </div>
-      <div class='card'>
-        <h1>Messagerie</h1>
-        {% for m in inbox %}
-          <div style='border:1px solid #e6edf8; border-radius:16px; padding:14px; margin-bottom:12px;'>
-            <strong>{{ m.subject }}</strong>
-            <p style='margin:8px 0;'>{{ m.body }}</p>
-            <p class='muted small'>De {{ m.sender_name }} à {{ m.receiver_name }} · {{ m.created_at }}</p>
+    # Traitement POST
+    if request.method == "POST":
+        action = request.form.get("action", "")
+
+        # Envoyer message privé
+        if action == "send_dm":
+            receiver_id = request.form.get("receiver_id")
+            body = request.form.get("body", "").strip()
+            if not receiver_id or not body:
+                return redirect(url_for("messages_page", chat=receiver_id))
+            execute_db(
+                "INSERT INTO messages (sender_id, receiver_id, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                (user["id"], receiver_id, "DM", body, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+            return redirect(url_for("messages_page", chat=receiver_id))
+
+        # Envoyer message de groupe
+        elif action == "send_group":
+            group_id = request.form.get("group_id")
+            body = request.form.get("body", "").strip()
+            if not group_id or not body:
+                return redirect(url_for("messages_page", group=group_id))
+            # Vérifier que l'user est bien membre
+            member = query_one(
+                "SELECT id FROM chat_group_members WHERE group_id = ? AND user_id = ?",
+                (group_id, user["id"])
+            )
+            if member:
+                execute_db(
+                    "INSERT INTO chat_group_messages (group_id, sender_id, body, created_at) VALUES (?, ?, ?, ?)",
+                    (group_id, user["id"], body, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                )
+            return redirect(url_for("messages_page", group=group_id))
+
+        # Créer un groupe (admin/prof seulement)
+        elif action == "create_group":
+            if user["role"] not in ["admin", "prof"]:
+                flash("Accès refusé.")
+                return redirect(url_for("messages_page"))
+            group_name = request.form.get("group_name", "").strip()
+            member_ids = request.form.getlist("member_ids")
+            if not group_name:
+                flash("Nom de groupe requis.")
+                return redirect(url_for("messages_page"))
+            # Créer le groupe
+            conn = get_conn()
+            try:
+                if USE_POSTGRES:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            adapt_sql("INSERT INTO chat_groups (name, created_by, created_at) VALUES (?, ?, ?)"),
+                            (group_name, user["id"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                        )
+                        cur.execute("SELECT lastval()")
+                        new_group_id = cur.fetchone()[0]
+                    conn.commit()
+                else:
+                    cur = conn.execute(
+                        "INSERT INTO chat_groups (name, created_by, created_at) VALUES (?, ?, ?)",
+                        (group_name, user["id"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    )
+                    new_group_id = cur.lastrowid
+                    conn.commit()
+            finally:
+                conn.close()
+            # Ajouter le créateur comme membre
+            execute_db(
+                "INSERT OR IGNORE INTO chat_group_members (group_id, user_id) VALUES (?, ?)",
+                (new_group_id, user["id"])
+            )
+            # Ajouter les membres sélectionnés
+            for mid in member_ids:
+                try:
+                    execute_db(
+                        "INSERT OR IGNORE INTO chat_group_members (group_id, user_id) VALUES (?, ?)",
+                        (new_group_id, int(mid))
+                    )
+                except Exception:
+                    pass
+            flash(f"Groupe « {group_name} » créé.")
+            return redirect(url_for("messages_page", group=new_group_id))
+
+        return redirect(url_for("messages_page"))
+
+    # Conversation active
+    active_chat_user = None
+    active_chat_messages = []
+    active_group = None
+    active_group_messages = []
+    active_group_members = []
+
+    chat_with = request.args.get("chat")
+    group_with = request.args.get("group")
+
+    if chat_with:
+        active_chat_user = query_one(
+            "SELECT id, full_name, role, profile_picture_url FROM users WHERE id = ?",
+            (chat_with,)
+        )
+        if active_chat_user:
+            active_chat_messages = query_all(
+                """
+                SELECT m.*, u.full_name AS sender_name, u.profile_picture_url AS sender_pic
+                FROM messages m
+                JOIN users u ON u.id = m.sender_id
+                WHERE (m.sender_id = ? AND m.receiver_id = ?)
+                   OR (m.sender_id = ? AND m.receiver_id = ?)
+                ORDER BY m.id ASC
+                """,
+                (user["id"], int(chat_with), int(chat_with), user["id"])
+            )
+
+    if group_with:
+        active_group = query_one("SELECT * FROM chat_groups WHERE id = ?", (group_with,))
+        if active_group:
+            # Vérifier membre
+            is_member = query_one(
+                "SELECT id FROM chat_group_members WHERE group_id = ? AND user_id = ?",
+                (group_with, user["id"])
+            )
+            if is_member:
+                active_group_messages = query_all(
+                    """
+                    SELECT cgm.*, u.full_name AS sender_name, u.profile_picture_url AS sender_pic
+                    FROM chat_group_messages cgm
+                    JOIN users u ON u.id = cgm.sender_id
+                    WHERE cgm.group_id = ?
+                    ORDER BY cgm.id ASC
+                    """,
+                    (group_with,)
+                )
+                active_group_members = query_all(
+                    """
+                    SELECT u.id, u.full_name, u.role, u.profile_picture_url
+                    FROM chat_group_members cgm
+                    JOIN users u ON u.id = cgm.user_id
+                    WHERE cgm.group_id = ?
+                    ORDER BY u.full_name
+                    """,
+                    (group_with,)
+                )
+            else:
+                active_group = None
+
+    # Derniers messages par contact pour la sidebar
+    contact_last_msg = {}
+    all_dms = query_all(
+        """
+        SELECT m.sender_id, m.receiver_id, m.body, m.created_at
+        FROM messages m
+        WHERE m.sender_id = ? OR m.receiver_id = ?
+        ORDER BY m.id DESC
+        """,
+        (user["id"], user["id"])
+    )
+    for msg in all_dms:
+        other_id = msg["receiver_id"] if msg["sender_id"] == user["id"] else msg["sender_id"]
+        if other_id not in contact_last_msg:
+            contact_last_msg[other_id] = msg["body"][:40]
+
+    # Dernier message de groupe
+    group_last_msg = {}
+    for grp in my_groups:
+        last = query_one(
+            "SELECT body FROM chat_group_messages WHERE group_id = ? ORDER BY id DESC LIMIT 1",
+            (grp["id"],)
+        )
+        group_last_msg[grp["id"]] = last["body"][:40] if last else "Aucun message"
+
+    # Template WhatsApp-style
+    page_template = BASE_TOP + NAV + """
+<style>
+  .wa-wrap {
+    display: flex;
+    height: calc(100vh - 62px);
+    overflow: hidden;
+    background: #f0f2f5;
+  }
+  /* Sidebar */
+  .wa-sidebar {
+    width: 360px;
+    min-width: 280px;
+    background: #fff;
+    border-right: 1px solid #e9edef;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .wa-sidebar-header {
+    background: #f0f2f5;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #e9edef;
+  }
+  .wa-sidebar-header h2 { margin: 0; font-size: 19px; font-weight: 700; color: #1f2937; }
+  .wa-sidebar-tabs {
+    display: flex;
+    background: #fff;
+    border-bottom: 1px solid #e9edef;
+  }
+  .wa-tab {
+    flex: 1;
+    padding: 10px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
+    color: #8696a0;
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    transition: all 0.2s;
+  }
+  .wa-tab.active { color: #1d4ed8; border-bottom-color: #1d4ed8; }
+  .wa-list { flex: 1; overflow-y: auto; }
+  .wa-contact-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    cursor: pointer;
+    border-bottom: 1px solid #f0f2f5;
+    transition: background 0.15s;
+    text-decoration: none;
+    color: inherit;
+  }
+  .wa-contact-item:hover, .wa-contact-item.active { background: #f0f2f5; }
+  .wa-avatar {
+    width: 48px; height: 48px; border-radius: 50%;
+    object-fit: cover; flex-shrink: 0;
+    background: #dbeafe;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; font-weight: 700; color: #1d4ed8;
+    overflow: hidden;
+  }
+  .wa-avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+  .wa-contact-info { flex: 1; min-width: 0; }
+  .wa-contact-name { font-weight: 600; font-size: 15px; color: #1f2937; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wa-contact-preview { font-size: 13px; color: #8696a0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .wa-group-badge { font-size: 11px; background: #e0f2fe; color: #0369a1; border-radius: 999px; padding: 2px 7px; font-weight: 700; }
+  /* Main chat */
+  .wa-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .wa-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #8696a0;
+    background: #f8fafc;
+  }
+  .wa-empty-icon { font-size: 72px; margin-bottom: 16px; opacity: 0.5; }
+  .wa-chat-header {
+    background: #f0f2f5;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid #e9edef;
+  }
+  .wa-chat-header-info { flex: 1; }
+  .wa-chat-header-name { font-weight: 700; font-size: 16px; color: #1f2937; }
+  .wa-chat-header-sub { font-size: 12px; color: #8696a0; }
+  .wa-messages-area {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    background: #efeae2;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60'%3E%3Cpath d='M0 0h60v60H0z' fill='%23e5ddd5'/%3E%3Cpath d='M30 0v60M0 30h60' stroke='%23d4c5b2' stroke-width='0.5'/%3E%3C/svg%3E");
+  }
+  .wa-msg {
+    display: flex;
+    margin-bottom: 6px;
+  }
+  .wa-msg.mine { justify-content: flex-end; }
+  .wa-msg.theirs { justify-content: flex-start; }
+  .wa-bubble {
+    max-width: 65%;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+    line-height: 1.5;
+    word-break: break-word;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.12);
+  }
+  .wa-msg.mine .wa-bubble { background: #d9fdd3; border-top-right-radius: 2px; }
+  .wa-msg.theirs .wa-bubble { background: #fff; border-top-left-radius: 2px; }
+  .wa-bubble-sender { font-size: 12px; font-weight: 700; color: #1d4ed8; margin-bottom: 3px; }
+  .wa-bubble-time { font-size: 11px; color: #8696a0; margin-top: 4px; text-align: right; }
+  .wa-input-bar {
+    background: #f0f2f5;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-top: 1px solid #e9edef;
+  }
+  .wa-input-bar input, .wa-input-bar textarea {
+    flex: 1;
+    border: none;
+    border-radius: 24px;
+    padding: 10px 16px;
+    font-size: 15px;
+    outline: none;
+    background: #fff;
+    resize: none;
+    max-height: 120px;
+    margin: 0;
+    box-shadow: none;
+  }
+  .wa-send-btn {
+    width: 44px; height: 44px;
+    border-radius: 50%;
+    background: #1d4ed8;
+    border: none;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    box-shadow: none;
+    padding: 0;
+  }
+  .wa-send-btn:hover { background: #1e40af; transform: none; }
+  .wa-send-btn svg { width: 22px; height: 22px; fill: white; }
+  /* Modal groupe */
+  .wa-modal-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.5); z-index: 200;
+    align-items: center; justify-content: center;
+  }
+  .wa-modal-overlay.show { display: flex; }
+  .wa-modal {
+    background: #fff; border-radius: 20px;
+    padding: 28px; width: 500px; max-width: 95vw;
+    max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+  }
+  .wa-modal h3 { margin-top: 0; }
+  .wa-modal input, .wa-modal select { margin-bottom: 12px; }
+  .wa-new-group-btn {
+    background: linear-gradient(90deg, #1d4ed8, #2563eb);
+    color: white; border: none; padding: 8px 14px;
+    border-radius: 20px; font-weight: 700; cursor: pointer;
+    font-size: 13px; display: flex; align-items: center; gap: 6px;
+    box-shadow: none;
+  }
+  .wa-new-group-btn:hover { transform: none; background: #1e40af; }
+  .member-check-list { max-height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 12px; padding: 8px; margin-bottom: 14px; }
+  .member-check-item { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 8px; cursor: pointer; }
+  .member-check-item:hover { background: #f0f2f5; }
+  .member-check-item input[type=checkbox] { width: 18px; height: 18px; margin: 0; cursor: pointer; }
+  .group-members-list { font-size: 13px; color: #8696a0; }
+  @media (max-width: 700px) {
+    .wa-sidebar { width: 100%; min-width: unset; display: {% if active_chat_user or active_group %}none{% else %}flex{% endif %}; }
+    .wa-main { display: {% if active_chat_user or active_group %}flex{% else %}none{% endif %}; }
+    .wa-wrap { height: calc(100vh - 56px); }
+  }
+</style>
+
+<div class='wa-wrap'>
+  <!-- SIDEBAR -->
+  <div class='wa-sidebar'>
+    <div class='wa-sidebar-header'>
+      <h2>💬 Messagerie</h2>
+      {% if user.role in ['admin', 'prof'] %}
+      <button class='wa-new-group-btn' onclick="document.getElementById('groupModal').classList.add('show')">
+        <svg viewBox='0 0 24 24' width='16' height='16' fill='white'><path d='M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z'/></svg>
+        Nouveau groupe
+      </button>
+      {% endif %}
+    </div>
+    <div class='wa-sidebar-tabs'>
+      <div class='wa-tab {% if not active_group %}active{% endif %}' onclick="showTab('contacts')">Contacts</div>
+      <div class='wa-tab {% if active_group %}active{% endif %}' onclick="showTab('groups')">Groupes</div>
+    </div>
+    <div class='wa-list' id='tab-contacts' style='display:{% if active_group %}none{% else %}block{% endif %}'>
+      {% for c in contacts %}
+      <a href='{{ url_for("messages_page") }}?chat={{ c.id }}' class='wa-contact-item {% if active_chat_user and active_chat_user.id == c.id %}active{% endif %}'>
+        <div class='wa-avatar'>
+          {% if c.profile_picture_url %}
+            <img src='{{ c.profile_picture_url }}' alt=''>
+          {% else %}
+            {{ c.full_name[:1].upper() }}
+          {% endif %}
+        </div>
+        <div class='wa-contact-info'>
+          <div class='wa-contact-name'>{{ c.full_name }}</div>
+          <div class='wa-contact-preview'>
+            {% if contact_last_msg.get(c.id) %}
+              {{ contact_last_msg[c.id] }}
+            {% else %}
+              <span style='color:#c7d2fe;font-style:italic;'>{{ c.role }}</span>
+            {% endif %}
           </div>
+        </div>
+      </a>
+      {% else %}
+        <p style='padding:16px; color:#8696a0; font-size:14px;'>Aucun contact disponible.</p>
+      {% endfor %}
+    </div>
+    <div class='wa-list' id='tab-groups' style='display:{% if active_group %}block{% else %}none{% endif %}'>
+      {% for grp in my_groups %}
+      <a href='{{ url_for("messages_page") }}?group={{ grp.id }}' class='wa-contact-item {% if active_group and active_group.id == grp.id %}active{% endif %}'>
+        <div class='wa-avatar' style='background:#ede9fe; color:#7c3aed;'>👥</div>
+        <div class='wa-contact-info'>
+          <div class='wa-contact-name'>
+            {{ grp.name }}
+            <span class='wa-group-badge'>groupe</span>
+          </div>
+          <div class='wa-contact-preview'>{{ group_last_msg.get(grp.id, 'Aucun message') }}</div>
+        </div>
+      </a>
+      {% else %}
+        <p style='padding:16px; color:#8696a0; font-size:14px;'>Aucun groupe pour le moment.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- MAIN CHAT -->
+  <div class='wa-main'>
+    {% if active_chat_user %}
+      <!-- Conversation privée -->
+      <div class='wa-chat-header'>
+        <div class='wa-avatar' style='width:40px;height:40px;font-size:16px;'>
+          {% if active_chat_user.profile_picture_url %}
+            <img src='{{ active_chat_user.profile_picture_url }}' alt=''>
+          {% else %}
+            {{ active_chat_user.full_name[:1].upper() }}
+          {% endif %}
+        </div>
+        <div class='wa-chat-header-info'>
+          <div class='wa-chat-header-name'>{{ active_chat_user.full_name }}</div>
+          <div class='wa-chat-header-sub'>{{ active_chat_user.role }}</div>
+        </div>
+      </div>
+      <div class='wa-messages-area' id='msgArea'>
+        {% for m in active_chat_messages %}
+        <div class='wa-msg {% if m.sender_id == user.id %}mine{% else %}theirs{% endif %}'>
+          <div class='wa-bubble'>
+            {% if m.sender_id != user.id %}
+              <div class='wa-bubble-sender'>{{ m.sender_name }}</div>
+            {% endif %}
+            {{ m.body }}
+            <div class='wa-bubble-time'>{{ m.created_at[11:16] if m.created_at|length > 10 else m.created_at }}</div>
+          </div>
+        </div>
         {% else %}
-          <p>Aucun message.</p>
+        <div style='text-align:center; color:#8696a0; margin-top:40px; font-size:14px;'>
+          Début de la conversation avec {{ active_chat_user.full_name }} 👋
+        </div>
         {% endfor %}
       </div>
-    </div>
-    """
-    return render_page(content, title="Messagerie", user=user, contacts=contacts, inbox=inbox)
+      <form class='wa-input-bar' method='post'>
+        <input type='hidden' name='action' value='send_dm'>
+        <input type='hidden' name='receiver_id' value='{{ active_chat_user.id }}'>
+        <input name='body' placeholder='Écris un message...' required autocomplete='off' id='dmInput'>
+        <button type='submit' class='wa-send-btn'>
+          <svg viewBox='0 0 24 24'><path d='M2.01 21L23 12 2.01 3 2 10l15 2-15 2z'/></svg>
+        </button>
+      </form>
+
+    {% elif active_group %}
+      <!-- Conversation de groupe -->
+      <div class='wa-chat-header'>
+        <div class='wa-avatar' style='width:40px;height:40px;font-size:18px;background:#ede9fe;color:#7c3aed;'>👥</div>
+        <div class='wa-chat-header-info'>
+          <div class='wa-chat-header-name'>{{ active_group.name }}</div>
+          <div class='wa-chat-header-sub group-members-list'>
+            {{ active_group_members | map(attribute='full_name') | join(', ') }}
+          </div>
+        </div>
+      </div>
+      <div class='wa-messages-area' id='msgArea'>
+        {% for m in active_group_messages %}
+        <div class='wa-msg {% if m.sender_id == user.id %}mine{% else %}theirs{% endif %}'>
+          <div class='wa-bubble'>
+            {% if m.sender_id != user.id %}
+              <div class='wa-bubble-sender'>{{ m.sender_name }}</div>
+            {% endif %}
+            {{ m.body }}
+            <div class='wa-bubble-time'>{{ m.created_at[11:16] if m.created_at|length > 10 else m.created_at }}</div>
+          </div>
+        </div>
+        {% else %}
+        <div style='text-align:center; color:#8696a0; margin-top:40px; font-size:14px;'>
+          Début du groupe « {{ active_group.name }} » 🎉
+        </div>
+        {% endfor %}
+      </div>
+      <form class='wa-input-bar' method='post'>
+        <input type='hidden' name='action' value='send_group'>
+        <input type='hidden' name='group_id' value='{{ active_group.id }}'>
+        <input name='body' placeholder='Écris un message dans le groupe...' required autocomplete='off'>
+        <button type='submit' class='wa-send-btn'>
+          <svg viewBox='0 0 24 24' fill='white'><path d='M2.01 21L23 12 2.01 3 2 10l15 2-15 2z'/></svg>
+        </button>
+      </form>
+
+    {% else %}
+      <!-- Écran vide -->
+      <div class='wa-empty'>
+        <div class='wa-empty-icon'>💬</div>
+        <h2 style='color:#3d4043; font-size:22px; margin-bottom:8px;'>Mini Pronote+ Messagerie</h2>
+        <p style='font-size:15px;'>Sélectionne un contact ou un groupe pour commencer à discuter</p>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% if user.role in ['admin', 'prof'] %}
+<!-- Modal création de groupe -->
+<div class='wa-modal-overlay' id='groupModal'>
+  <div class='wa-modal'>
+    <h3>🟣 Créer un groupe</h3>
+    <form method='post'>
+      <input type='hidden' name='action' value='create_group'>
+      <label>Nom du groupe</label>
+      <input name='group_name' placeholder='Ex: Classe 6A Maths' required>
+      <label>Membres à ajouter</label>
+      <div class='member-check-list'>
+        {% for c in contacts %}
+        <label class='member-check-item'>
+          <input type='checkbox' name='member_ids' value='{{ c.id }}'>
+          <div class='wa-avatar' style='width:32px;height:32px;font-size:13px;'>
+            {% if c.profile_picture_url %}
+              <img src='{{ c.profile_picture_url }}' alt=''>
+            {% else %}
+              {{ c.full_name[:1].upper() }}
+            {% endif %}
+          </div>
+          <span>{{ c.full_name }} <span style='color:#8696a0;font-size:12px;'>({{ c.role }})</span></span>
+        </label>
+        {% endfor %}
+      </div>
+      <div style='display:flex;gap:10px;'>
+        <button type='submit' style='flex:1;'>Créer le groupe</button>
+        <button type='button' class='secondary' onclick="document.getElementById('groupModal').classList.remove('show')" style='flex:1;'>Annuler</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<script>
+function showTab(tab) {
+  document.getElementById('tab-contacts').style.display = tab === 'contacts' ? 'block' : 'none';
+  document.getElementById('tab-groups').style.display = tab === 'groups' ? 'block' : 'none';
+  document.querySelectorAll('.wa-tab').forEach((el, i) => {
+    el.classList.toggle('active', (tab === 'contacts' && i === 0) || (tab === 'groups' && i === 1));
+  });
+}
+// Scroll to bottom of messages
+const msgArea = document.getElementById('msgArea');
+if (msgArea) msgArea.scrollTop = msgArea.scrollHeight;
+// Enter to send
+const dmInput = document.getElementById('dmInput');
+if (dmInput) {
+  dmInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); this.form.submit(); }
+  });
+}
+</script>
+</body></html>
+"""
+    return render_template_string(
+        page_template,
+        title="Messagerie",
+        user=user,
+        contacts=contacts,
+        my_groups=my_groups,
+        active_chat_user=active_chat_user,
+        active_chat_messages=active_chat_messages,
+        active_group=active_group,
+        active_group_messages=active_group_messages,
+        active_group_members=active_group_members,
+        contact_last_msg=contact_last_msg,
+        group_last_msg=group_last_msg,
+        session=session,
+        url_for=url_for,
+    )
 
 
 # =========================
