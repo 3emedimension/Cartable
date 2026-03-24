@@ -3,6 +3,10 @@ import sqlite3
 from datetime import datetime
 from functools import wraps
 
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
+
 from flask import (
     Flask,
     flash,
@@ -12,7 +16,6 @@ from flask import (
     session,
     url_for,
     g,
-    send_from_directory,
 )
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -36,9 +39,15 @@ DB_NAME = "mini_pronote_v10.db"
 ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Azsqerfd2012")
 SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "EcoleR2026")
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# =========================
+# Cloudinary configuration
+# =========================
+cloudinary.config(
+    cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.environ.get("CLOUDINARY_API_KEY"),
+    api_secret=os.environ.get("CLOUDINARY_API_SECRET"),
+    secure=True,
+)
 
 ALLOWED_EXTENSIONS = {
     "pdf", "png", "jpg", "jpeg", "gif", "webp",
@@ -46,6 +55,7 @@ ALLOWED_EXTENSIONS = {
     "xls", "xlsx"
 }
 PROFILE_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
+IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp"}
 
 
 # =========================
@@ -65,9 +75,6 @@ def adapt_sql(sql: str) -> str:
     return sql
 
 
-# =========================
-# Helpers DB
-# =========================
 def query_all(sql, params=()):
     conn = get_conn()
     try:
@@ -134,7 +141,6 @@ def table_has_column(table_name, column_name):
             (table_name, column_name),
         )
         return bool(row)
-
     conn = get_conn()
     try:
         columns = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -155,7 +161,6 @@ def table_exists(table_name):
             (table_name,),
         )
         return bool(row)
-
     row = query_one(
         "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
         (table_name,),
@@ -163,6 +168,9 @@ def table_exists(table_name):
     return bool(row)
 
 
+# =========================
+# Cloudinary helpers
+# =========================
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -171,33 +179,59 @@ def allowed_profile_image(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in PROFILE_IMAGE_EXTENSIONS
 
 
-def unique_filename(filename: str) -> str:
-    base = secure_filename(filename)
-    name, ext = os.path.splitext(base)
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
-    return f"{name}_{timestamp}{ext}"
-
-
-def get_safe_upload_path(filename: str):
+def is_image_file(filename: str) -> bool:
     if not filename:
+        return False
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in IMAGE_EXTENSIONS
+
+
+def upload_to_cloudinary(file_storage, folder="pronote_uploads", resource_type="auto"):
+    """Upload a file to Cloudinary and return the public_id and secure_url."""
+    try:
+        result = cloudinary.uploader.upload(
+            file_storage,
+            folder=folder,
+            resource_type=resource_type,
+        )
+        return result.get("public_id"), result.get("secure_url")
+    except Exception as e:
+        print(f"Cloudinary upload error: {e}")
         return None, None
-    safe_name = os.path.basename(filename)
-    full_path = os.path.join(UPLOAD_FOLDER, safe_name)
-    return safe_name, full_path
 
 
-def file_exists_in_uploads(filename: str) -> bool:
-    safe_name, full_path = get_safe_upload_path(filename)
-    return bool(safe_name and full_path and os.path.isfile(full_path))
+def delete_from_cloudinary(public_id, resource_type="auto"):
+    """Delete a file from Cloudinary by public_id."""
+    if not public_id:
+        return
+    try:
+        cloudinary.uploader.destroy(public_id, resource_type=resource_type)
+    except Exception as e:
+        print(f"Cloudinary delete error: {e}")
 
 
-def delete_uploaded_file_if_exists(filename: str):
-    safe_name, full_path = get_safe_upload_path(filename)
-    if safe_name and full_path and os.path.isfile(full_path):
-        try:
-            os.remove(full_path)
-        except Exception:
-            pass
+def get_cloudinary_url(public_id, resource_type="auto"):
+    """Get the URL for a Cloudinary resource."""
+    if not public_id:
+        return None
+    try:
+        if resource_type == "image":
+            return cloudinary.CloudinaryImage(public_id).build_url(secure=True)
+        else:
+            return cloudinary.CloudinaryImage(public_id).build_url(secure=True, resource_type=resource_type)
+    except Exception:
+        return None
+
+
+def cloudinary_file_exists(public_id):
+    """Check if a file exists on Cloudinary."""
+    if not public_id:
+        return False
+    try:
+        # public_id starts with folder/
+        cloudinary.api.resource(public_id)
+        return True
+    except Exception:
+        return False
 
 
 def init_db():
@@ -212,7 +246,6 @@ def init_db():
                     name TEXT UNIQUE NOT NULL
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -223,17 +256,16 @@ def init_db():
                     class_id INTEGER REFERENCES classes(id),
                     child_id INTEGER REFERENCES users(id),
                     child_id_2 INTEGER REFERENCES users(id),
-                    profile_picture TEXT
+                    profile_picture TEXT,
+                    profile_picture_url TEXT
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS subjects (
                     id SERIAL PRIMARY KEY,
                     name TEXT UNIQUE NOT NULL
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS grades (
                     id SERIAL PRIMARY KEY,
@@ -245,7 +277,6 @@ def init_db():
                     created_at TEXT NOT NULL
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS homework (
                     id SERIAL PRIMARY KEY,
@@ -256,10 +287,11 @@ def init_db():
                     description TEXT NOT NULL,
                     due_date TEXT NOT NULL,
                     attachment TEXT,
+                    attachment_url TEXT,
+                    attachment_name TEXT,
                     created_at TEXT NOT NULL
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS schedules (
                     id SERIAL PRIMARY KEY,
@@ -272,7 +304,6 @@ def init_db():
                     room TEXT
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS absences (
                     id SERIAL PRIMARY KEY,
@@ -284,7 +315,6 @@ def init_db():
                     created_at TEXT NOT NULL
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id SERIAL PRIMARY KEY,
@@ -295,7 +325,6 @@ def init_db():
                     created_at TEXT NOT NULL
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS general_info (
                     id SERIAL PRIMARY KEY,
@@ -312,7 +341,6 @@ def init_db():
                     name TEXT UNIQUE NOT NULL
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -324,19 +352,18 @@ def init_db():
                     child_id INTEGER,
                     child_id_2 INTEGER,
                     profile_picture TEXT,
+                    profile_picture_url TEXT,
                     FOREIGN KEY(class_id) REFERENCES classes(id),
                     FOREIGN KEY(child_id) REFERENCES users(id),
                     FOREIGN KEY(child_id_2) REFERENCES users(id)
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS subjects (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT UNIQUE NOT NULL
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS grades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -351,7 +378,6 @@ def init_db():
                     FOREIGN KEY(teacher_id) REFERENCES users(id)
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS homework (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -362,13 +388,14 @@ def init_db():
                     description TEXT NOT NULL,
                     due_date TEXT NOT NULL,
                     attachment TEXT,
+                    attachment_url TEXT,
+                    attachment_name TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(class_id) REFERENCES classes(id),
                     FOREIGN KEY(subject_id) REFERENCES subjects(id),
                     FOREIGN KEY(teacher_id) REFERENCES users(id)
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS schedules (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -384,7 +411,6 @@ def init_db():
                     FOREIGN KEY(teacher_id) REFERENCES users(id)
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS absences (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -398,7 +424,6 @@ def init_db():
                     FOREIGN KEY(teacher_id) REFERENCES users(id)
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,7 +436,6 @@ def init_db():
                     FOREIGN KEY(receiver_id) REFERENCES users(id)
                 )
             """)
-
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS general_info (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -427,14 +451,14 @@ def init_db():
     finally:
         conn.close()
 
-    if not table_has_column("users", "child_id"):
-        execute_db("ALTER TABLE users ADD COLUMN child_id INTEGER")
-    if not table_has_column("users", "child_id_2"):
-        execute_db("ALTER TABLE users ADD COLUMN child_id_2 INTEGER")
-    if not table_has_column("users", "profile_picture"):
-        execute_db("ALTER TABLE users ADD COLUMN profile_picture TEXT")
-    if not table_has_column("homework", "attachment"):
-        execute_db("ALTER TABLE homework ADD COLUMN attachment TEXT")
+    # Migrations
+    for col in ["child_id", "child_id_2", "profile_picture", "profile_picture_url"]:
+        if not table_has_column("users", col):
+            execute_db(f"ALTER TABLE users ADD COLUMN {col} {'INTEGER' if 'id' in col else 'TEXT'}")
+
+    for col in ["attachment", "attachment_url", "attachment_name"]:
+        if not table_has_column("homework", col):
+            execute_db(f"ALTER TABLE homework ADD COLUMN {col} TEXT")
 
     if not table_exists("general_info"):
         if USE_POSTGRES:
@@ -471,11 +495,11 @@ def init_db():
             [("Mathématiques",), ("Français",), ("Histoire",), ("Anglais",), ("SVT",), ("Physique",)],
         )
 
-    admin_user = query_one("SELECT id FROM users WHERE username = ?", ("admin",))
     admin_hash = generate_password_hash(ADMIN_DEFAULT_PASSWORD)
+    admin_user = query_one("SELECT id FROM users WHERE username = ?", ("admin",))
     if not admin_user:
         execute_db(
-            "INSERT INTO users (username, password, role, full_name, class_id, child_id, child_id_2, profile_picture) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)",
+            "INSERT INTO users (username, password, role, full_name, class_id, child_id, child_id_2, profile_picture, profile_picture_url) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)",
             ("admin", admin_hash, "admin", "Administrateur"),
         )
     else:
@@ -547,13 +571,11 @@ def role_required(*roles):
 def get_parent_children(user):
     if user["role"] != "parent":
         return []
-
     child_ids = []
     if user.get("child_id"):
         child_ids.append(user["child_id"])
     if user.get("child_id_2") and user["child_id_2"] not in child_ids:
         child_ids.append(user["child_id_2"])
-
     children = []
     for child_id in child_ids:
         child = query_one(
@@ -591,7 +613,6 @@ BASE_TOP = """
         linear-gradient(135deg, #eff6ff, #f8fbff 55%, #eef4ff);
       color: #18212f;
     }
-
     .nav {
       background: linear-gradient(90deg, #0f172a, #1d4ed8);
       color: white;
@@ -605,247 +626,51 @@ BASE_TOP = """
       top: 0;
       z-index: 50;
     }
-    .brand-wrap {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-width: 0;
-    }
+    .brand-wrap { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .nav strong { font-size: 20px; }
-    .nav-user {
-      font-size: 14px;
-      opacity: 0.95;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 280px;
-    }
-    .nav-links {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-    .nav a {
-      color: white;
-      text-decoration: none;
-      font-weight: 700;
-      opacity: 0.95;
-    }
+    .nav-user { font-size: 14px; opacity: 0.95; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px; }
+    .nav-links { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .nav a { color: white; text-decoration: none; font-weight: 700; opacity: 0.95; }
     .nav a:hover { opacity: 1; text-decoration: underline; }
-
-    .burger {
-      display: none;
-      width: 44px;
-      height: 44px;
-      border-radius: 12px;
-      border: 1px solid rgba(255,255,255,0.25);
-      background: rgba(255,255,255,0.08);
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      padding: 0;
-    }
-    .burger-lines {
-      display: flex;
-      flex-direction: column;
-      gap: 5px;
-    }
-    .burger-lines span {
-      display: block;
-      width: 22px;
-      height: 2.5px;
-      background: white;
-      border-radius: 10px;
-    }
-
-    .mobile-menu {
-      display: none;
-      position: fixed;
-      top: 0;
-      right: -320px;
-      width: 280px;
-      max-width: 85vw;
-      height: 100vh;
-      background: linear-gradient(180deg, #0f172a, #1e3a8a);
-      padding: 22px 16px;
-      box-shadow: -10px 0 28px rgba(15, 23, 42, 0.3);
-      z-index: 80;
-      transition: right 0.25s ease;
-      overflow-y: auto;
-    }
+    .burger { display: none; width: 44px; height: 44px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.25); background: rgba(255,255,255,0.08); align-items: center; justify-content: center; cursor: pointer; padding: 0; }
+    .burger-lines { display: flex; flex-direction: column; gap: 5px; }
+    .burger-lines span { display: block; width: 22px; height: 2.5px; background: white; border-radius: 10px; }
+    .mobile-menu { display: none; position: fixed; top: 0; right: -320px; width: 280px; max-width: 85vw; height: 100vh; background: linear-gradient(180deg, #0f172a, #1e3a8a); padding: 22px 16px; box-shadow: -10px 0 28px rgba(15, 23, 42, 0.3); z-index: 80; transition: right 0.25s ease; overflow-y: auto; }
     .mobile-menu.open { right: 0; }
-    .mobile-menu a {
-      display: block;
-      color: white;
-      text-decoration: none;
-      padding: 12px 10px;
-      border-radius: 12px;
-      font-weight: 700;
-      margin-bottom: 8px;
-      background: rgba(255,255,255,0.06);
-    }
+    .mobile-menu a { display: block; color: white; text-decoration: none; padding: 12px 10px; border-radius: 12px; font-weight: 700; margin-bottom: 8px; background: rgba(255,255,255,0.06); }
     .mobile-menu a:hover { background: rgba(255,255,255,0.12); }
-    .mobile-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 16px;
-      color: white;
-    }
-    .close-menu {
-      background: transparent;
-      border: 1px solid rgba(255,255,255,0.25);
-      box-shadow: none;
-      padding: 8px 12px;
-    }
-    .mobile-overlay {
-      display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(15, 23, 42, 0.45);
-      z-index: 70;
-    }
+    .mobile-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; color: white; }
+    .close-menu { background: transparent; border: 1px solid rgba(255,255,255,0.25); box-shadow: none; padding: 8px 12px; }
+    .mobile-overlay { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); z-index: 70; }
     .mobile-overlay.show { display: block; }
-
-    .container {
-      max-width: 1260px;
-      margin: 28px auto;
-      padding: 0 18px;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 18px;
-    }
-    .card {
-      background: rgba(255,255,255,0.93);
-      backdrop-filter: blur(10px);
-      border-radius: 24px;
-      padding: 24px;
-      box-shadow: 0 18px 36px rgba(37,99,235,0.10);
-      border: 1px solid rgba(255,255,255,0.85);
-      overflow-x: auto;
-    }
-    .hero {
-      background: linear-gradient(135deg, #1d4ed8, #60a5fa);
-      color: white;
-      border-radius: 28px;
-      padding: 30px;
-      box-shadow: 0 20px 36px rgba(37,99,235,0.24);
-      margin-bottom: 20px;
-    }
+    .container { max-width: 1260px; margin: 28px auto; padding: 0 18px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+    .card { background: rgba(255,255,255,0.93); backdrop-filter: blur(10px); border-radius: 24px; padding: 24px; box-shadow: 0 18px 36px rgba(37,99,235,0.10); border: 1px solid rgba(255,255,255,0.85); overflow-x: auto; }
+    .hero { background: linear-gradient(135deg, #1d4ed8, #60a5fa); color: white; border-radius: 28px; padding: 30px; box-shadow: 0 20px 36px rgba(37,99,235,0.24); margin-bottom: 20px; }
     .hero p { opacity: 0.96; }
     h1, h2, h3 { margin-top: 0; }
-
-    input, select, textarea {
-      width: 100%;
-      padding: 12px 13px;
-      border: 1px solid #d5e0f3;
-      border-radius: 13px;
-      margin-top: 6px;
-      margin-bottom: 14px;
-      font-size: 15px;
-      background: #fff;
-      outline: none;
-    }
-    input:focus, select:focus, textarea:focus {
-      border-color: #60a5fa;
-      box-shadow: 0 0 0 4px rgba(96,165,250,0.16);
-    }
+    input, select, textarea { width: 100%; padding: 12px 13px; border: 1px solid #d5e0f3; border-radius: 13px; margin-top: 6px; margin-bottom: 14px; font-size: 15px; background: #fff; outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: #60a5fa; box-shadow: 0 0 0 4px rgba(96,165,250,0.16); }
     textarea { min-height: 110px; resize: vertical; }
-
-    button {
-      background: linear-gradient(90deg, #1d4ed8, #2563eb);
-      color: white;
-      border: none;
-      padding: 11px 16px;
-      border-radius: 12px;
-      font-weight: 700;
-      cursor: pointer;
-      box-shadow: 0 10px 20px rgba(37,99,235,0.18);
-    }
+    button { background: linear-gradient(90deg, #1d4ed8, #2563eb); color: white; border: none; padding: 11px 16px; border-radius: 12px; font-weight: 700; cursor: pointer; box-shadow: 0 10px 20px rgba(37,99,235,0.18); }
     button:hover { transform: translateY(-1px); }
-
     .danger { background: linear-gradient(90deg, #c0392b, #e74c3c); }
     .secondary { background: linear-gradient(90deg, #475569, #64748b); }
     .muted { color: #5f6b7a; }
-    .flash {
-      background: #fff9db;
-      border: 1px solid #f2dd7d;
-      padding: 11px 13px;
-      border-radius: 12px;
-      margin-bottom: 16px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      overflow: hidden;
-      border-radius: 16px;
-      background: white;
-      min-width: 640px;
-    }
-    th, td {
-      padding: 12px 10px;
-      border-bottom: 1px solid #ebf0f8;
-      text-align: left;
-      vertical-align: top;
-    }
+    .flash { background: #fff9db; border: 1px solid #f2dd7d; padding: 11px 13px; border-radius: 12px; margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 16px; background: white; min-width: 640px; }
+    th, td { padding: 12px 10px; border-bottom: 1px solid #ebf0f8; text-align: left; vertical-align: top; }
     th { background: #edf4ff; }
-
-    .badge {
-      display: inline-block;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: #e7efff;
-      color: #1d4ed8;
-      font-weight: 700;
-      font-size: 13px;
-    }
+    .badge { display: inline-block; padding: 6px 10px; border-radius: 999px; background: #e7efff; color: #1d4ed8; font-weight: 700; font-size: 13px; }
     .small { font-size: 13px; }
     .metric { font-size: 34px; font-weight: 800; margin: 0; }
     .two-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
     .login-wrap { max-width: 980px; margin: 40px auto; }
-
-    .avatar {
-      width: 68px;
-      height: 68px;
-      border-radius: 50%;
-      object-fit: cover;
-      border: 3px solid rgba(255,255,255,0.7);
-      background: #dbeafe;
-      flex-shrink: 0;
-    }
-    .avatar-large {
-      width: 110px;
-      height: 110px;
-      border-radius: 50%;
-      object-fit: cover;
-      border: 4px solid rgba(255,255,255,0.8);
-      background: #dbeafe;
-    }
-    .info-box {
-      border: 1px solid #e5ebf5;
-      border-radius: 16px;
-      padding: 16px;
-      margin-bottom: 14px;
-      background: #fff;
-    }
-    .actions-inline {
-      display:flex;
-      gap:8px;
-      flex-wrap:wrap;
-      margin-top:12px;
-    }
-    .admin-box {
-      margin-top: 14px;
-      padding: 14px;
-      border-radius: 14px;
-      background: #f8fbff;
-      border: 1px solid #dbeafe;
-    }
-
+    .avatar { width: 68px; height: 68px; border-radius: 50%; object-fit: cover; border: 3px solid rgba(255,255,255,0.7); background: #dbeafe; flex-shrink: 0; }
+    .avatar-large { width: 110px; height: 110px; border-radius: 50%; object-fit: cover; border: 4px solid rgba(255,255,255,0.8); background: #dbeafe; }
+    .info-box { border: 1px solid #e5ebf5; border-radius: 16px; padding: 16px; margin-bottom: 14px; background: #fff; }
+    .actions-inline { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+    .admin-box { margin-top: 14px; padding: 14px; border-radius: 14px; background: #f8fbff; border: 1px solid #dbeafe; }
     @media (max-width: 900px) {
       .two-cols { grid-template-columns: 1fr; }
       .nav-links { display: none; }
@@ -871,7 +696,6 @@ NAV = """
       <span class='nav-user'>{{ session.get('full_name') }} ({{ session.get('role') }})</span>
     {% endif %}
   </div>
-
   {% if session.get('user_id') %}
   <div class='nav-links'>
     <a href='{{ url_for("dashboard") }}'>Accueil</a>
@@ -891,19 +715,13 @@ NAV = """
     {% endif %}
     <a href='{{ url_for("logout") }}'>Déconnexion</a>
   </div>
-
   <button class='burger' type='button' onclick='openMobileMenu()'>
-    <div class='burger-lines'>
-      <span></span><span></span><span></span>
-    </div>
+    <div class='burger-lines'><span></span><span></span><span></span></div>
   </button>
   {% else %}
-  <div class='nav-links'>
-    <a href='{{ url_for("login") }}'>Connexion</a>
-  </div>
+  <div class='nav-links'><a href='{{ url_for("login") }}'>Connexion</a></div>
   {% endif %}
 </div>
-
 {% if session.get('user_id') %}
 <div id='mobileOverlay' class='mobile-overlay' onclick='closeMobileMenu()'></div>
 <div id='mobileMenu' class='mobile-menu'>
@@ -970,12 +788,10 @@ def site_access():
 
     if request.method == "POST":
         password = request.form.get("password", "").strip()
-
         if password == SITE_PASSWORD:
             session["site_unlocked"] = True
             flash("Accès autorisé.")
             return redirect(url_for("login"))
-
         flash("Mot de passe du site incorrect.")
 
     content = """
@@ -1006,7 +822,6 @@ def index():
 def login():
     if not session.get("site_unlocked"):
         return redirect(url_for("site_access"))
-
     if g.user:
         return redirect(url_for("dashboard"))
 
@@ -1026,7 +841,6 @@ def login():
             session["full_name"] = user["full_name"]
             flash("Connexion réussie.")
             return redirect(url_for("dashboard"))
-
         flash("Identifiants invalides.")
 
     content = """
@@ -1034,7 +848,6 @@ def login():
       <div class='grid'>
         <div class='card'>
           <h1>Connexion</h1>
-          <p class='muted'>Version complète avec gestion admin étendue.</p>
           <p class='muted'>Pas de compte ? <a href='{{ url_for("register") }}'>Créer un compte</a></p>
           <form method='post' autocomplete='off'>
             <label>Nom d'utilisateur</label>
@@ -1047,8 +860,8 @@ def login():
         <div class='card'>
           <h2>Fonctions</h2>
           <p><span class='badge'>Admin</span> gestion complète des comptes, devoirs, notes, absences, EDT</p>
-          <p><span class='badge'>Téléchargement</span> pièces jointes fonctionnelles</p>
-          <p><span class='badge'>Profil</span> photo de profil visible</p>
+          <p><span class='badge'>Fichiers</span> pièces jointes permanentes via Cloudinary</p>
+          <p><span class='badge'>Profil</span> photo de profil permanente</p>
         </div>
       </div>
     </div>
@@ -1091,7 +904,7 @@ def register():
 
         try:
             execute_db(
-                "INSERT INTO users (username, password, role, full_name, class_id, child_id, child_id_2, profile_picture) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                "INSERT INTO users (username, password, role, full_name, class_id, child_id, child_id_2, profile_picture, profile_picture_url) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
                 (username, generate_password_hash(password), role, full_name, class_id, child_id, child_id_2),
             )
             flash("Compte créé. Tu peux maintenant te connecter.")
@@ -1103,12 +916,9 @@ def register():
     <div class='card' style='max-width:700px; margin:auto;'>
       <h1>Créer un compte</h1>
       <form method='post' autocomplete='off'>
-        <label>Nom complet</label>
-        <input name='full_name' required>
-        <label>Nom d'utilisateur</label>
-        <input name='username' required>
-        <label>Mot de passe</label>
-        <input type='password' name='password' required>
+        <label>Nom complet</label><input name='full_name' required>
+        <label>Nom d'utilisateur</label><input name='username' required>
+        <label>Mot de passe</label><input type='password' name='password' required>
         <label>Type de compte</label>
         <select name='role' id='role_select' required onchange='toggleRegisterFields()'>
           <option value='eleve'>Élève</option>
@@ -1116,7 +926,7 @@ def register():
           <option value='parent'>Parent</option>
         </select>
         <div id='class_block'>
-          <label>Classe (élève / professeur)</label>
+          <label>Classe</label>
           <select name='class_id'>
             <option value=''>Aucune</option>
             {% for c in classes %}<option value='{{ c.id }}'>{{ c.name }}</option>{% endfor %}
@@ -1160,38 +970,6 @@ def logout():
 
 
 # =========================
-# Fichiers / uploads
-# =========================
-@app.route("/uploads/<path:filename>")
-@login_required
-def uploaded_file(filename):
-    safe_name, full_path = get_safe_upload_path(filename)
-
-    if not safe_name or not full_path or not os.path.isfile(full_path):
-        flash("Fichier introuvable.")
-        return redirect(url_for("dashboard"))
-
-    return send_from_directory(UPLOAD_FOLDER, safe_name)
-
-
-@app.route("/download/<path:filename>")
-@login_required
-def download_file(filename):
-    safe_name, full_path = get_safe_upload_path(filename)
-
-    if not safe_name or not full_path or not os.path.isfile(full_path):
-        flash("Pièce jointe introuvable.")
-        return redirect(url_for("homework_page"))
-
-    return send_from_directory(
-        UPLOAD_FOLDER,
-        safe_name,
-        as_attachment=True,
-        download_name=safe_name
-    )
-
-
-# =========================
 # Profil
 # =========================
 @app.route("/profile", methods=["GET", "POST"])
@@ -1210,26 +988,25 @@ def profile_page():
             flash("Format image non autorisé.")
             return redirect(url_for("profile_page"))
 
-        new_filename = unique_filename(uploaded.filename)
-        save_path = os.path.join(UPLOAD_FOLDER, new_filename)
+        # Supprimer l'ancienne photo sur Cloudinary
+        old_user = query_one("SELECT profile_picture FROM users WHERE id = ?", (user["id"],))
+        if old_user and old_user.get("profile_picture"):
+            delete_from_cloudinary(old_user["profile_picture"], resource_type="image")
 
-        try:
-            uploaded.save(save_path)
-        except Exception:
+        # Uploader la nouvelle photo
+        public_id, secure_url = upload_to_cloudinary(
+            uploaded,
+            folder="pronote_profiles",
+            resource_type="image"
+        )
+
+        if not public_id or not secure_url:
             flash("Impossible d'enregistrer la photo de profil.")
             return redirect(url_for("profile_page"))
 
-        if not os.path.isfile(save_path):
-            flash("La photo n'a pas pu être enregistrée.")
-            return redirect(url_for("profile_page"))
-
-        old_user = query_one("SELECT profile_picture FROM users WHERE id = ?", (user["id"],))
-        if old_user and old_user.get("profile_picture"):
-            delete_uploaded_file_if_exists(old_user["profile_picture"])
-
         execute_db(
-            "UPDATE users SET profile_picture = ? WHERE id = ?",
-            (new_filename, user["id"]),
+            "UPDATE users SET profile_picture = ?, profile_picture_url = ? WHERE id = ?",
+            (public_id, secure_url, user["id"]),
         )
         flash("Photo de profil mise à jour.")
         return redirect(url_for("profile_page"))
@@ -1247,8 +1024,8 @@ def profile_page():
     content = """
     <div class='grid'>
       <div class='card' style='text-align:center;'>
-        {% if user.profile_picture and file_exists_in_uploads(user.profile_picture) %}
-          <img src='{{ url_for("uploaded_file", filename=user.profile_picture) }}' class='avatar-large' alt='Photo de profil'>
+        {% if user.profile_picture_url %}
+          <img src='{{ user.profile_picture_url }}' class='avatar-large' alt='Photo de profil'>
         {% else %}
           <div class='avatar-large' style='display:inline-flex; align-items:center; justify-content:center; color:#1d4ed8; font-size:34px; font-weight:800;'>
             {{ user.full_name[:1] }}
@@ -1257,7 +1034,6 @@ def profile_page():
         <h1 style='margin-top:16px;'>{{ user.full_name }}</h1>
         <p class='muted'>@{{ user.username }} · {{ user.role }}{% if user.class_name %} · {{ user.class_name }}{% endif %}</p>
       </div>
-
       <div class='card'>
         <h2>Changer la photo de profil</h2>
         <form method='post' enctype='multipart/form-data'>
@@ -1269,7 +1045,7 @@ def profile_page():
       </div>
     </div>
     """
-    return render_page(content, title="Profil", user=refreshed_user, file_exists_in_uploads=file_exists_in_uploads)
+    return render_page(content, title="Profil", user=refreshed_user)
 
 
 # =========================
@@ -1287,14 +1063,11 @@ def general_info_page():
             if user["role"] not in ["prof", "admin"]:
                 flash("Accès refusé.")
                 return redirect(url_for("general_info_page"))
-
             title = request.form.get("title", "").strip()
             body = request.form.get("body", "").strip()
-
             if not title or not body:
                 flash("Remplis le titre et le contenu.")
                 return redirect(url_for("general_info_page"))
-
             execute_db(
                 "INSERT INTO general_info (title, body, author_id, created_at) VALUES (?, ?, ?, ?)",
                 (title, body, user["id"], datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
@@ -1307,19 +1080,15 @@ def general_info_page():
             title = request.form.get("title", "").strip()
             body = request.form.get("body", "").strip()
             info = query_one("SELECT * FROM general_info WHERE id = ?", (info_id,))
-
             if not info:
                 flash("Information introuvable.")
                 return redirect(url_for("general_info_page"))
-
             if user["role"] != "admin" and str(info["author_id"]) != str(user["id"]):
                 flash("Tu ne peux pas modifier cette information.")
                 return redirect(url_for("general_info_page"))
-
             if not title or not body:
                 flash("Titre ou contenu invalide.")
                 return redirect(url_for("general_info_page"))
-
             execute_db(
                 "UPDATE general_info SET title = ?, body = ? WHERE id = ?",
                 (title, body, info_id),
@@ -1330,15 +1099,12 @@ def general_info_page():
         elif form_type == "delete":
             info_id = request.form.get("info_id")
             info = query_one("SELECT * FROM general_info WHERE id = ?", (info_id,))
-
             if not info:
                 flash("Information introuvable.")
                 return redirect(url_for("general_info_page"))
-
             if user["role"] != "admin" and str(info["author_id"]) != str(user["id"]):
                 flash("Tu ne peux pas supprimer cette information.")
                 return redirect(url_for("general_info_page"))
-
             execute_db("DELETE FROM general_info WHERE id = ?", (info_id,))
             flash("Information supprimée.")
             return redirect(url_for("general_info_page"))
@@ -1359,15 +1125,12 @@ def general_info_page():
         <h2>Publier une information</h2>
         <form method='post'>
           <input type='hidden' name='form_type' value='create'>
-          <label>Titre</label>
-          <input name='title' required>
-          <label>Contenu</label>
-          <textarea name='body' required></textarea>
+          <label>Titre</label><input name='title' required>
+          <label>Contenu</label><textarea name='body' required></textarea>
           <button type='submit'>Publier</button>
         </form>
       </div>
       {% endif %}
-
       <div class='card'>
         <h1>Info général</h1>
         {% for info in infos %}
@@ -1375,19 +1138,14 @@ def general_info_page():
             <strong>{{ info.title }}</strong>
             <p style='margin:10px 0;'>{{ info.body }}</p>
             <p class='muted small'>Par {{ info.author_name }} · {{ info.created_at }}</p>
-
             {% if user.role == 'admin' or info.author_id == user.id %}
             <div class='admin-box'>
               <form method='post'>
                 <input type='hidden' name='form_type' value='update'>
                 <input type='hidden' name='info_id' value='{{ info.id }}'>
-                <label>Titre</label>
-                <input name='title' value='{{ info.title }}' required>
-                <label>Contenu</label>
-                <textarea name='body' required>{{ info.body }}</textarea>
-                <div class='actions-inline'>
-                  <button type='submit'>Modifier</button>
-                </div>
+                <label>Titre</label><input name='title' value='{{ info.title }}' required>
+                <label>Contenu</label><textarea name='body' required>{{ info.body }}</textarea>
+                <div class='actions-inline'><button type='submit'>Modifier</button></div>
               </form>
               <form method='post' onsubmit="return confirm('Supprimer cette information ?');" style='margin-top:10px;'>
                 <input type='hidden' name='form_type' value='delete'>
@@ -1427,7 +1185,7 @@ def dashboard():
 
     if user["role"] == "eleve":
         grades_list = query_all("SELECT value FROM grades WHERE student_id = ?", (user["id"],))
-        avg = round(sum(g["value"] for g in grades_list) / len(grades_list), 2) if grades_list else "-"
+        avg = round(sum(r["value"] for r in grades_list) / len(grades_list), 2) if grades_list else "-"
         if user.get("class_id"):
             homework_total = query_one(
                 "SELECT COUNT(*) AS total FROM homework WHERE class_id IS NULL OR class_id = ?",
@@ -1435,31 +1193,22 @@ def dashboard():
             )["total"]
         else:
             homework_total = query_one("SELECT COUNT(*) AS total FROM homework WHERE class_id IS NULL")["total"]
-
         stats = {
             "Moyenne générale": avg,
             "Notes": len(grades_list),
             "Devoirs": homework_total,
             "Absences": query_one("SELECT COUNT(*) AS total FROM absences WHERE student_id = ?", (user["id"],))["total"],
         }
-
     elif user["role"] == "parent":
         if parent_children:
             child_ids = [child["id"] for child in parent_children]
             placeholders = ",".join(["?"] * len(child_ids))
             grades_list = query_all(f"SELECT value FROM grades WHERE student_id IN ({placeholders})", tuple(child_ids))
-            avg = round(sum(g["value"] for g in grades_list) / len(grades_list), 2) if grades_list else "-"
+            avg = round(sum(r["value"] for r in grades_list) / len(grades_list), 2) if grades_list else "-"
             abs_total = query_one(f"SELECT COUNT(*) AS total FROM absences WHERE student_id IN ({placeholders})", tuple(child_ids))["total"]
-            stats = {
-                "Enfants": len(parent_children),
-                "Noms": parent_child_names,
-                "Moyenne générale": avg,
-                "Notes": len(grades_list),
-                "Absences": abs_total,
-            }
+            stats = {"Enfants": len(parent_children), "Noms": parent_child_names, "Moyenne générale": avg, "Notes": len(grades_list), "Absences": abs_total}
         else:
             stats = {"Enfants": 0, "Noms": "Non liés", "Moyenne générale": "-", "Notes": 0, "Absences": 0}
-
     elif user["role"] == "prof":
         stats = {
             "Notes saisies": query_one("SELECT COUNT(*) AS total FROM grades WHERE teacher_id = ?", (user["id"],))["total"],
@@ -1467,7 +1216,6 @@ def dashboard():
             "Messages reçus": query_one("SELECT COUNT(*) AS total FROM messages WHERE receiver_id = ?", (user["id"],))["total"],
             "Élèves": query_one("SELECT COUNT(*) AS total FROM users WHERE role='eleve'")["total"],
         }
-
     else:
         stats = {
             "Utilisateurs": query_one("SELECT COUNT(*) AS total FROM users")["total"],
@@ -1482,27 +1230,24 @@ def dashboard():
         FROM messages m
         JOIN users u ON u.id = m.sender_id
         WHERE m.receiver_id = ?
-        ORDER BY m.id DESC
-        LIMIT 5
+        ORDER BY m.id DESC LIMIT 5
         """,
         (user["id"],),
     )
-
     general_infos = query_all(
         """
         SELECT gi.*, u.full_name AS author_name
         FROM general_info gi
         JOIN users u ON u.id = gi.author_id
-        ORDER BY gi.id DESC
-        LIMIT 5
+        ORDER BY gi.id DESC LIMIT 5
         """
     )
 
     content = """
     <div class='hero'>
       <div style='display:flex; align-items:center; gap:18px; flex-wrap:wrap;'>
-        {% if user.profile_picture and file_exists_in_uploads(user.profile_picture) %}
-          <img src='{{ url_for("uploaded_file", filename=user.profile_picture) }}' class='avatar' alt='Photo de profil'>
+        {% if user.profile_picture_url %}
+          <img src='{{ user.profile_picture_url }}' class='avatar' alt='Photo de profil'>
         {% else %}
           <div class='avatar' style='display:flex; align-items:center; justify-content:center; color:#1d4ed8; font-size:24px; font-weight:800;'>
             {{ user.full_name[:1] }}
@@ -1518,13 +1263,11 @@ def dashboard():
         </div>
       </div>
     </div>
-
     <div class='grid'>
       {% for key, value in stats.items() %}
         <div class='card'><h3>{{ key }}</h3><p class='metric'>{{ value }}</p></div>
       {% endfor %}
     </div>
-
     <div class='grid' style='margin-top:18px;'>
       <div class='card'>
         <h2>Accès rapide</h2>
@@ -1536,7 +1279,6 @@ def dashboard():
         <p><a href='{{ url_for("messages_page") }}'>Ouvrir la messagerie</a></p>
         <p><a href='{{ url_for("profile_page") }}'>Mon profil</a></p>
       </div>
-
       <div class='card'>
         <h2>Derniers messages</h2>
         {% for m in latest_messages %}
@@ -1549,7 +1291,6 @@ def dashboard():
         {% endfor %}
       </div>
     </div>
-
     <div class='card' style='margin-top:18px;'>
       <h2>Infos générales récentes</h2>
       {% for info in general_infos %}
@@ -1572,7 +1313,6 @@ def dashboard():
         latest_messages=latest_messages,
         parent_child_names=parent_child_names,
         general_infos=general_infos,
-        file_exists_in_uploads=file_exists_in_uploads,
     )
 
 
@@ -1591,17 +1331,14 @@ def grades():
             if user["role"] not in ["admin", "prof"]:
                 flash("Accès refusé.")
                 return redirect(url_for("grades"))
-
             grade_id = request.form.get("grade_id")
             grade = query_one("SELECT * FROM grades WHERE id = ?", (grade_id,))
             if not grade:
                 flash("Note introuvable.")
                 return redirect(url_for("grades"))
-
             if user["role"] == "prof" and str(grade["teacher_id"]) != str(user["id"]):
                 flash("Tu ne peux modifier que tes propres notes.")
                 return redirect(url_for("grades"))
-
             try:
                 value_float = float(request.form.get("value"))
                 if value_float < 0 or value_float > 20:
@@ -1609,7 +1346,6 @@ def grades():
             except Exception:
                 flash("La note doit être entre 0 et 20.")
                 return redirect(url_for("grades"))
-
             execute_db(
                 "UPDATE grades SET value = ?, comment = ? WHERE id = ?",
                 (value_float, request.form.get("comment", "").strip(), grade_id),
@@ -1621,17 +1357,14 @@ def grades():
             if user["role"] not in ["admin", "prof"]:
                 flash("Accès refusé.")
                 return redirect(url_for("grades"))
-
             grade_id = request.form.get("grade_id")
             grade = query_one("SELECT * FROM grades WHERE id = ?", (grade_id,))
             if not grade:
                 flash("Note introuvable.")
                 return redirect(url_for("grades"))
-
             if user["role"] == "prof" and str(grade["teacher_id"]) != str(user["id"]):
                 flash("Tu ne peux supprimer que tes propres notes.")
                 return redirect(url_for("grades"))
-
             execute_db("DELETE FROM grades WHERE id = ?", (grade_id,))
             flash("Note supprimée.")
             return redirect(url_for("grades"))
@@ -1639,15 +1372,8 @@ def grades():
     if user["role"] == "eleve":
         rows = query_all(
             """
-            SELECT
-                g.id,
-                g.student_id,
-                g.teacher_id,
-                g.value,
-                g.comment,
-                g.created_at,
-                s.name AS subject_name,
-                u.full_name AS teacher_name
+            SELECT g.id, g.student_id, g.teacher_id, g.value, g.comment, g.created_at,
+                   s.name AS subject_name, u.full_name AS teacher_name
             FROM grades g
             JOIN subjects s ON s.id = g.subject_id
             JOIN users u ON u.id = g.teacher_id
@@ -1658,14 +1384,10 @@ def grades():
         )
         averages = query_all(
             """
-            SELECT
-                s.name AS subject_name,
-                ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS average_value
-            FROM grades g
-            JOIN subjects s ON s.id = g.subject_id
+            SELECT s.name AS subject_name, ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS average_value
+            FROM grades g JOIN subjects s ON s.id = g.subject_id
             WHERE g.student_id = ?
-            GROUP BY s.name
-            ORDER BY s.name
+            GROUP BY s.name ORDER BY s.name
             """,
             (user["id"],),
         )
@@ -1674,26 +1396,13 @@ def grades():
     elif user["role"] == "parent":
         children = get_parent_children(user)
         if not children:
-            return render_page(
-                "<div class='card'><h1>Notes</h1><p>Aucun enfant lié à ce compte parent.</p></div>",
-                title="Notes",
-            )
-
+            return render_page("<div class='card'><h1>Notes</h1><p>Aucun enfant lié à ce compte parent.</p></div>", title="Notes")
         student_ids = [child["id"] for child in children]
         placeholders = ",".join(["?"] * len(student_ids))
-
         rows = query_all(
             f"""
-            SELECT
-                g.id,
-                g.student_id,
-                g.teacher_id,
-                g.value,
-                g.comment,
-                g.created_at,
-                s.name AS subject_name,
-                u.full_name AS teacher_name,
-                stu.full_name AS student_name
+            SELECT g.id, g.student_id, g.teacher_id, g.value, g.comment, g.created_at,
+                   s.name AS subject_name, u.full_name AS teacher_name, stu.full_name AS student_name
             FROM grades g
             JOIN subjects s ON s.id = g.subject_id
             JOIN users u ON u.id = g.teacher_id
@@ -1705,34 +1414,19 @@ def grades():
         )
         averages = query_all(
             f"""
-            SELECT
-                stu.full_name AS student_name,
-                s.name AS subject_name,
-                ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS average_value
-            FROM grades g
-            JOIN users stu ON stu.id = g.student_id
-            JOIN subjects s ON s.id = g.subject_id
+            SELECT stu.full_name AS student_name, s.name AS subject_name, ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS average_value
+            FROM grades g JOIN users stu ON stu.id = g.student_id JOIN subjects s ON s.id = g.subject_id
             WHERE g.student_id IN ({placeholders})
-            GROUP BY stu.full_name, s.name
-            ORDER BY stu.full_name, s.name
+            GROUP BY stu.full_name, s.name ORDER BY stu.full_name, s.name
             """,
             tuple(student_ids),
         )
         show_student_col = True
-
     else:
         rows = query_all(
             """
-            SELECT
-                g.id,
-                g.student_id,
-                g.teacher_id,
-                g.value,
-                g.comment,
-                g.created_at,
-                s.name AS subject_name,
-                stu.full_name AS student_name,
-                tea.full_name AS teacher_name
+            SELECT g.id, g.student_id, g.teacher_id, g.value, g.comment, g.created_at,
+                   s.name AS subject_name, stu.full_name AS student_name, tea.full_name AS teacher_name
             FROM grades g
             JOIN subjects s ON s.id = g.subject_id
             JOIN users stu ON stu.id = g.student_id
@@ -1742,15 +1436,9 @@ def grades():
         )
         averages = query_all(
             """
-            SELECT
-                stu.full_name AS student_name,
-                s.name AS subject_name,
-                ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS average_value
-            FROM grades g
-            JOIN users stu ON stu.id = g.student_id
-            JOIN subjects s ON s.id = g.subject_id
-            GROUP BY stu.full_name, s.name
-            ORDER BY stu.full_name, s.name
+            SELECT stu.full_name AS student_name, s.name AS subject_name, ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS average_value
+            FROM grades g JOIN users stu ON stu.id = g.student_id JOIN subjects s ON s.id = g.subject_id
+            GROUP BY stu.full_name, s.name ORDER BY stu.full_name, s.name
             """
         )
         show_student_col = True
@@ -1772,28 +1460,24 @@ def grades():
                 <td>{{ row.created_at }}</td>
               </tr>
               {% if user.role in ['admin', 'prof'] %}
-              <tr>
-                <td colspan='6'>
-                  <div class='admin-box'>
-                    <form method='post'>
-                      <input type='hidden' name='form_type' value='update'>
-                      <input type='hidden' name='grade_id' value='{{ row.id }}'>
-                      <label>Nouvelle note</label>
-                      <input type='number' step='0.1' min='0' max='20' name='value' value='{{ row.value }}' required>
-                      <label>Commentaire</label>
-                      <textarea name='comment'>{{ row.comment or '' }}</textarea>
-                      <div class='actions-inline'>
-                        <button type='submit'>Modifier</button>
-                      </div>
-                    </form>
-                    <form method='post' onsubmit="return confirm('Supprimer cette note ?');" style='margin-top:10px;'>
-                      <input type='hidden' name='form_type' value='delete'>
-                      <input type='hidden' name='grade_id' value='{{ row.id }}'>
-                      <button type='submit' class='danger'>Supprimer</button>
-                    </form>
-                  </div>
-                </td>
-              </tr>
+              <tr><td colspan='6'>
+                <div class='admin-box'>
+                  <form method='post'>
+                    <input type='hidden' name='form_type' value='update'>
+                    <input type='hidden' name='grade_id' value='{{ row.id }}'>
+                    <label>Nouvelle note</label>
+                    <input type='number' step='0.1' min='0' max='20' name='value' value='{{ row.value }}' required>
+                    <label>Commentaire</label>
+                    <textarea name='comment'>{{ row.comment or '' }}</textarea>
+                    <div class='actions-inline'><button type='submit'>Modifier</button></div>
+                  </form>
+                  <form method='post' onsubmit="return confirm('Supprimer cette note ?');" style='margin-top:10px;'>
+                    <input type='hidden' name='form_type' value='delete'>
+                    <input type='hidden' name='grade_id' value='{{ row.id }}'>
+                    <button type='submit' class='danger'>Supprimer</button>
+                  </form>
+                </div>
+              </td></tr>
               {% endif %}
             {% else %}
               <tr><td colspan='6'>Aucune note.</td></tr>
@@ -1801,7 +1485,6 @@ def grades():
           </tbody>
         </table>
       </div>
-
       <div class='card'>
         <h2>Moyennes automatiques</h2>
         <table>
@@ -1893,33 +1576,29 @@ def homework_page():
                 return redirect(url_for("homework_page"))
 
             uploaded = request.files.get("attachment")
-            attachment_name = None
+            attachment_public_id = None
+            attachment_url = None
+            attachment_original_name = None
 
             if uploaded and uploaded.filename:
                 original_name = secure_filename(uploaded.filename)
-                if not original_name:
-                    flash("Nom de fichier invalide.")
-                    return redirect(url_for("homework_page"))
-
-                if not allowed_file(original_name):
+                if not original_name or not allowed_file(original_name):
                     flash("Type de fichier non autorisé.")
                     return redirect(url_for("homework_page"))
 
-                attachment_name = unique_filename(original_name)
-                save_path = os.path.join(UPLOAD_FOLDER, attachment_name)
-
-                try:
-                    uploaded.save(save_path)
-                except Exception:
+                attachment_original_name = original_name
+                resource_type = "image" if is_image_file(original_name) else "raw"
+                attachment_public_id, attachment_url = upload_to_cloudinary(
+                    uploaded,
+                    folder="pronote_homework",
+                    resource_type=resource_type,
+                )
+                if not attachment_public_id:
                     flash("Erreur pendant l'enregistrement de la pièce jointe.")
                     return redirect(url_for("homework_page"))
 
-                if not os.path.isfile(save_path):
-                    flash("Le fichier n'a pas pu être enregistré.")
-                    return redirect(url_for("homework_page"))
-
             execute_db(
-                "INSERT INTO homework (class_id, subject_id, teacher_id, title, description, due_date, attachment, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO homework (class_id, subject_id, teacher_id, title, description, due_date, attachment, attachment_url, attachment_name, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     request.form.get("class_id") or None,
                     request.form.get("subject_id"),
@@ -1927,7 +1606,9 @@ def homework_page():
                     title,
                     description,
                     due_date,
-                    attachment_name,
+                    attachment_public_id,
+                    attachment_url,
+                    attachment_original_name,
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ),
             )
@@ -1955,13 +1636,18 @@ def homework_page():
                 flash("Champs invalides.")
                 return redirect(url_for("homework_page"))
 
-            new_attachment = hw["attachment"]
+            new_public_id = hw["attachment"]
+            new_url = hw["attachment_url"]
+            new_name = hw["attachment_name"]
             remove_attachment = request.form.get("remove_attachment") == "1"
             uploaded = request.files.get("attachment")
 
-            if remove_attachment and new_attachment:
-                delete_uploaded_file_if_exists(new_attachment)
-                new_attachment = None
+            if remove_attachment and new_public_id:
+                resource_type = "image" if is_image_file(new_name or "") else "raw"
+                delete_from_cloudinary(new_public_id, resource_type=resource_type)
+                new_public_id = None
+                new_url = None
+                new_name = None
 
             if uploaded and uploaded.filename:
                 original_name = secure_filename(uploaded.filename)
@@ -1969,15 +1655,17 @@ def homework_page():
                     flash("Nouvelle pièce jointe invalide.")
                     return redirect(url_for("homework_page"))
 
-                if new_attachment:
-                    delete_uploaded_file_if_exists(new_attachment)
+                if new_public_id:
+                    resource_type = "image" if is_image_file(new_name or "") else "raw"
+                    delete_from_cloudinary(new_public_id, resource_type=resource_type)
 
-                new_attachment = unique_filename(original_name)
-                uploaded.save(os.path.join(UPLOAD_FOLDER, new_attachment))
+                resource_type = "image" if is_image_file(original_name) else "raw"
+                new_public_id, new_url = upload_to_cloudinary(uploaded, folder="pronote_homework", resource_type=resource_type)
+                new_name = original_name
 
             execute_db(
-                "UPDATE homework SET class_id = ?, subject_id = ?, title = ?, description = ?, due_date = ?, attachment = ? WHERE id = ?",
-                (class_id, subject_id, title, description, due_date, new_attachment, homework_id),
+                "UPDATE homework SET class_id = ?, subject_id = ?, title = ?, description = ?, due_date = ?, attachment = ?, attachment_url = ?, attachment_name = ? WHERE id = ?",
+                (class_id, subject_id, title, description, due_date, new_public_id, new_url, new_name, homework_id),
             )
             flash("Devoir modifié.")
             return redirect(url_for("homework_page"))
@@ -1994,7 +1682,8 @@ def homework_page():
                 return redirect(url_for("homework_page"))
 
             if hw.get("attachment"):
-                delete_uploaded_file_if_exists(hw["attachment"])
+                resource_type = "image" if is_image_file(hw.get("attachment_name") or "") else "raw"
+                delete_from_cloudinary(hw["attachment"], resource_type=resource_type)
 
             execute_db("DELETE FROM homework WHERE id = ?", (homework_id,))
             flash("Devoir supprimé.")
@@ -2016,9 +1705,7 @@ def homework_page():
             items = query_all(
                 f"""
                 SELECT h.*, s.name AS subject_name, u.full_name AS teacher_name, c.name AS class_name
-                FROM homework h
-                JOIN subjects s ON s.id = h.subject_id
-                JOIN users u ON u.id = h.teacher_id
+                FROM homework h JOIN subjects s ON s.id = h.subject_id JOIN users u ON u.id = h.teacher_id
                 LEFT JOIN classes c ON c.id = h.class_id
                 WHERE h.class_id IS NULL OR h.class_id IN ({placeholders})
                 ORDER BY h.due_date ASC
@@ -2029,23 +1716,17 @@ def homework_page():
             items = query_all(
                 """
                 SELECT h.*, s.name AS subject_name, u.full_name AS teacher_name, c.name AS class_name
-                FROM homework h
-                JOIN subjects s ON s.id = h.subject_id
-                JOIN users u ON u.id = h.teacher_id
+                FROM homework h JOIN subjects s ON s.id = h.subject_id JOIN users u ON u.id = h.teacher_id
                 LEFT JOIN classes c ON c.id = h.class_id
-                WHERE h.class_id IS NULL
-                ORDER BY h.due_date ASC
+                WHERE h.class_id IS NULL ORDER BY h.due_date ASC
                 """
             )
     else:
         items = query_all(
             """
             SELECT h.*, s.name AS subject_name, u.full_name AS teacher_name, c.name AS class_name
-            FROM homework h
-            JOIN subjects s ON s.id = h.subject_id
-            JOIN users u ON u.id = h.teacher_id
-            LEFT JOIN classes c ON c.id = h.class_id
-            ORDER BY h.due_date ASC
+            FROM homework h JOIN subjects s ON s.id = h.subject_id JOIN users u ON u.id = h.teacher_id
+            LEFT JOIN classes c ON c.id = h.class_id ORDER BY h.due_date ASC
             """
         )
 
@@ -2068,7 +1749,6 @@ def homework_page():
         </form>
       </div>
       {% endif %}
-
       <div class='card'>
         <h1>Devoirs</h1>
         {% for item in items %}
@@ -2078,47 +1758,31 @@ def homework_page():
             </div>
             <p>{{ item.description }}</p>
             <p class='muted'>Classe : {{ item.class_name or 'Toutes' }} · Professeur : {{ item.teacher_name }} · Date limite : {{ item.due_date }}</p>
-
-            {% if item.attachment %}
-              {% if file_exists_in_uploads(item.attachment) %}
-                <p><a href='{{ url_for("download_file", filename=item.attachment) }}'>Télécharger la pièce jointe</a></p>
-              {% else %}
-                <p class='muted'><strong>Pièce jointe introuvable</strong></p>
-              {% endif %}
+            {% if item.attachment_url %}
+              <p><a href='{{ item.attachment_url }}' target='_blank'>📎 Télécharger : {{ item.attachment_name or 'pièce jointe' }}</a></p>
             {% endif %}
-
             {% if user.role == 'admin' %}
             <div class='admin-box'>
               <form method='post' enctype='multipart/form-data'>
                 <input type='hidden' name='form_type' value='update'>
                 <input type='hidden' name='homework_id' value='{{ item.id }}'>
-                <label>Titre</label>
-                <input name='title' value='{{ item.title }}' required>
-                <label>Description</label>
-                <textarea name='description' required>{{ item.description }}</textarea>
-                <label>Date limite</label>
-                <input type='date' name='due_date' value='{{ item.due_date }}' required>
+                <label>Titre</label><input name='title' value='{{ item.title }}' required>
+                <label>Description</label><textarea name='description' required>{{ item.description }}</textarea>
+                <label>Date limite</label><input type='date' name='due_date' value='{{ item.due_date }}' required>
                 <label>Classe</label>
                 <select name='class_id'>
                   <option value=''>Toutes les classes</option>
-                  {% for c in classes %}
-                    <option value='{{ c.id }}' {% if item.class_id == c.id %}selected{% endif %}>{{ c.name }}</option>
-                  {% endfor %}
+                  {% for c in classes %}<option value='{{ c.id }}' {% if item.class_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
                 </select>
                 <label>Matière</label>
                 <select name='subject_id' required>
-                  {% for s in subjects %}
-                    <option value='{{ s.id }}' {% if item.subject_id == s.id %}selected{% endif %}>{{ s.name }}</option>
-                  {% endfor %}
+                  {% for s in subjects %}<option value='{{ s.id }}' {% if item.subject_id == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}
                 </select>
-                <label>Nouvelle pièce jointe</label>
-                <input type='file' name='attachment'>
-                {% if item.attachment %}
+                <label>Nouvelle pièce jointe</label><input type='file' name='attachment'>
+                {% if item.attachment_url %}
                   <label><input type='checkbox' name='remove_attachment' value='1' style='width:auto; margin-right:8px;'> Supprimer la pièce jointe actuelle</label>
                 {% endif %}
-                <div class='actions-inline'>
-                  <button type='submit'>Modifier</button>
-                </div>
+                <div class='actions-inline'><button type='submit'>Modifier</button></div>
               </form>
               <form method='post' onsubmit="return confirm('Supprimer ce devoir ?');" style='margin-top:10px;'>
                 <input type='hidden' name='form_type' value='delete'>
@@ -2134,15 +1798,7 @@ def homework_page():
       </div>
     </div>
     """
-    return render_page(
-        content,
-        title="Devoirs",
-        user=user,
-        items=items,
-        subjects=subjects,
-        classes=classes,
-        file_exists_in_uploads=file_exists_in_uploads,
-    )
+    return render_page(content, title="Devoirs", user=user, items=items, subjects=subjects, classes=classes)
 
 
 # =========================
@@ -2161,9 +1817,8 @@ def schedule_page():
 
         if form_type == "create":
             if user["role"] != "admin":
-                flash("Seul l'admin peut ajouter un cours à l'emploi du temps.")
+                flash("Seul l'admin peut ajouter un cours.")
                 return redirect(url_for("schedule_page"))
-
             execute_db(
                 "INSERT INTO schedules (class_id, subject_id, teacher_id, day_name, start_time, end_time, room) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -2176,14 +1831,13 @@ def schedule_page():
                     request.form.get("room", "").strip(),
                 ),
             )
-            flash("Cours ajouté à l'emploi du temps.")
+            flash("Cours ajouté.")
             return redirect(url_for("schedule_page"))
 
         elif form_type == "update":
             if user["role"] != "admin":
                 flash("Accès refusé.")
                 return redirect(url_for("schedule_page"))
-
             schedule_id = request.form.get("schedule_id")
             execute_db(
                 "UPDATE schedules SET class_id = ?, subject_id = ?, teacher_id = ?, day_name = ?, start_time = ?, end_time = ?, room = ? WHERE id = ?",
@@ -2205,8 +1859,7 @@ def schedule_page():
             if user["role"] != "admin":
                 flash("Accès refusé.")
                 return redirect(url_for("schedule_page"))
-            schedule_id = request.form.get("schedule_id")
-            execute_db("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+            execute_db("DELETE FROM schedules WHERE id = ?", (request.form.get("schedule_id"),))
             flash("Cours supprimé.")
             return redirect(url_for("schedule_page"))
 
@@ -2220,21 +1873,20 @@ def schedule_page():
     else:
         target_class_ids = []
 
+    order_clause = """
+        ORDER BY c.name,
+          CASE sc.day_name WHEN 'Lundi' THEN 1 WHEN 'Mardi' THEN 2 WHEN 'Mercredi' THEN 3 WHEN 'Jeudi' THEN 4 WHEN 'Vendredi' THEN 5 ELSE 6 END,
+          sc.start_time
+    """
+
     if user["role"] in ["eleve", "parent"]:
         if target_class_ids:
             placeholders = ",".join(["?"] * len(target_class_ids))
             rows = query_all(
                 f"""
-                SELECT sc.id, sc.class_id, sc.subject_id, sc.teacher_id, sc.day_name, sc.start_time, sc.end_time, sc.room,
-                       s.name AS subject_name, u.full_name AS teacher_name, c.name AS class_name
-                FROM schedules sc
-                JOIN subjects s ON s.id = sc.subject_id
-                JOIN users u ON u.id = sc.teacher_id
-                JOIN classes c ON c.id = sc.class_id
-                WHERE sc.class_id IN ({placeholders})
-                ORDER BY c.name,
-                  CASE sc.day_name WHEN 'Lundi' THEN 1 WHEN 'Mardi' THEN 2 WHEN 'Mercredi' THEN 3 WHEN 'Jeudi' THEN 4 WHEN 'Vendredi' THEN 5 ELSE 6 END,
-                  sc.start_time
+                SELECT sc.*, s.name AS subject_name, u.full_name AS teacher_name, c.name AS class_name
+                FROM schedules sc JOIN subjects s ON s.id = sc.subject_id JOIN users u ON u.id = sc.teacher_id JOIN classes c ON c.id = sc.class_id
+                WHERE sc.class_id IN ({placeholders}) {order_clause}
                 """,
                 tuple(target_class_ids),
             )
@@ -2242,16 +1894,10 @@ def schedule_page():
             rows = []
     else:
         rows = query_all(
-            """
-            SELECT sc.id, sc.class_id, sc.subject_id, sc.teacher_id, sc.day_name, sc.start_time, sc.end_time, sc.room,
-                   s.name AS subject_name, u.full_name AS teacher_name, c.name AS class_name
-            FROM schedules sc
-            JOIN subjects s ON s.id = sc.subject_id
-            JOIN users u ON u.id = sc.teacher_id
-            JOIN classes c ON c.id = sc.class_id
-            ORDER BY c.name,
-              CASE sc.day_name WHEN 'Lundi' THEN 1 WHEN 'Mardi' THEN 2 WHEN 'Mercredi' THEN 3 WHEN 'Jeudi' THEN 4 WHEN 'Vendredi' THEN 5 ELSE 6 END,
-              sc.start_time
+            f"""
+            SELECT sc.*, s.name AS subject_name, u.full_name AS teacher_name, c.name AS class_name
+            FROM schedules sc JOIN subjects s ON s.id = sc.subject_id JOIN users u ON u.id = sc.teacher_id JOIN classes c ON c.id = sc.class_id
+            {order_clause}
             """
         )
 
@@ -2273,7 +1919,6 @@ def schedule_page():
         </form>
       </div>
       {% endif %}
-
       <div class='card'>
         <h1>Emploi du temps</h1>
         <table>
@@ -2282,37 +1927,32 @@ def schedule_page():
             {% for r in rows %}
               <tr><td>{{ r.class_name }}</td><td>{{ r.day_name }}</td><td>{{ r.start_time }} - {{ r.end_time }}</td><td>{{ r.subject_name }}</td><td>{{ r.teacher_name }}</td><td>{{ r.room or '-' }}</td></tr>
               {% if user.role == 'admin' %}
-              <tr>
-                <td colspan='6'>
-                  <div class='admin-box'>
-                    <form method='post'>
-                      <input type='hidden' name='form_type' value='update'>
-                      <input type='hidden' name='schedule_id' value='{{ r.id }}'>
-                      <label>Classe</label>
-                      <select name='class_id' required>{% for c in classes %}<option value='{{ c.id }}' {% if r.class_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select>
-                      <label>Matière</label>
-                      <select name='subject_id' required>{% for s in subjects %}<option value='{{ s.id }}' {% if r.subject_id == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}</select>
-                      <label>Professeur</label>
-                      <select name='teacher_id' required>{% for t in teachers %}<option value='{{ t.id }}' {% if r.teacher_id == t.id %}selected{% endif %}>{{ t.full_name }}</option>{% endfor %}</select>
-                      <label>Jour</label>
-                      <select name='day_name' required>
-                        {% for day in ['Lundi','Mardi','Mercredi','Jeudi','Vendredi'] %}
-                          <option value='{{ day }}' {% if r.day_name == day %}selected{% endif %}>{{ day }}</option>
-                        {% endfor %}
-                      </select>
-                      <label>Début</label><input type='time' name='start_time' value='{{ r.start_time }}' required>
-                      <label>Fin</label><input type='time' name='end_time' value='{{ r.end_time }}' required>
-                      <label>Salle</label><input name='room' value='{{ r.room or "" }}'>
-                      <div class='actions-inline'><button type='submit'>Modifier</button></div>
-                    </form>
-                    <form method='post' onsubmit="return confirm('Supprimer ce cours ?');" style='margin-top:10px;'>
-                      <input type='hidden' name='form_type' value='delete'>
-                      <input type='hidden' name='schedule_id' value='{{ r.id }}'>
-                      <button type='submit' class='danger'>Supprimer</button>
-                    </form>
-                  </div>
-                </td>
-              </tr>
+              <tr><td colspan='6'>
+                <div class='admin-box'>
+                  <form method='post'>
+                    <input type='hidden' name='form_type' value='update'>
+                    <input type='hidden' name='schedule_id' value='{{ r.id }}'>
+                    <label>Classe</label><select name='class_id' required>{% for c in classes %}<option value='{{ c.id }}' {% if r.class_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select>
+                    <label>Matière</label><select name='subject_id' required>{% for s in subjects %}<option value='{{ s.id }}' {% if r.subject_id == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}</select>
+                    <label>Professeur</label><select name='teacher_id' required>{% for t in teachers %}<option value='{{ t.id }}' {% if r.teacher_id == t.id %}selected{% endif %}>{{ t.full_name }}</option>{% endfor %}</select>
+                    <label>Jour</label>
+                    <select name='day_name' required>
+                      {% for day in ['Lundi','Mardi','Mercredi','Jeudi','Vendredi'] %}
+                        <option value='{{ day }}' {% if r.day_name == day %}selected{% endif %}>{{ day }}</option>
+                      {% endfor %}
+                    </select>
+                    <label>Début</label><input type='time' name='start_time' value='{{ r.start_time }}' required>
+                    <label>Fin</label><input type='time' name='end_time' value='{{ r.end_time }}' required>
+                    <label>Salle</label><input name='room' value='{{ r.room or "" }}'>
+                    <div class='actions-inline'><button type='submit'>Modifier</button></div>
+                  </form>
+                  <form method='post' onsubmit="return confirm('Supprimer ce cours ?');" style='margin-top:10px;'>
+                    <input type='hidden' name='form_type' value='delete'>
+                    <input type='hidden' name='schedule_id' value='{{ r.id }}'>
+                    <button type='submit' class='danger'>Supprimer</button>
+                  </form>
+                </div>
+              </td></tr>
               {% endif %}
             {% else %}
               <tr><td colspan='6'>Aucun cours programmé.</td></tr>
@@ -2341,7 +1981,6 @@ def absences_page():
             if user["role"] not in ["prof", "admin"]:
                 flash("Accès refusé.")
                 return redirect(url_for("absences_page"))
-
             execute_db(
                 "INSERT INTO absences (student_id, teacher_id, absence_date, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -2360,7 +1999,6 @@ def absences_page():
             if user["role"] != "admin":
                 flash("Seul l'admin peut modifier les absences.")
                 return redirect(url_for("absences_page"))
-
             absence_id = request.form.get("absence_id")
             execute_db(
                 "UPDATE absences SET student_id = ?, absence_date = ?, reason = ?, status = ? WHERE id = ?",
@@ -2379,9 +2017,7 @@ def absences_page():
             if user["role"] != "admin":
                 flash("Seul l'admin peut supprimer les absences.")
                 return redirect(url_for("absences_page"))
-
-            absence_id = request.form.get("absence_id")
-            execute_db("DELETE FROM absences WHERE id = ?", (absence_id,))
+            execute_db("DELETE FROM absences WHERE id = ?", (request.form.get("absence_id"),))
             flash("Absence supprimée.")
             return redirect(url_for("absences_page"))
 
@@ -2430,7 +2066,6 @@ def absences_page():
         </form>
       </div>
       {% endif %}
-
       <div class='card'>
         <h1>Absences</h1>
         <table>
@@ -2439,35 +2074,29 @@ def absences_page():
             {% for r in rows %}
               <tr>{% if user.role in ['admin','prof','parent'] %}<td>{{ r.student_name }}</td><td>{{ r.class_name or '-' }}</td>{% endif %}<td>{{ r.absence_date }}</td><td>{{ r.reason or '-' }}</td><td>{{ r.status }}</td><td>{{ r.teacher_name }}</td></tr>
               {% if user.role == 'admin' %}
-              <tr>
-                <td colspan='6'>
-                  <div class='admin-box'>
-                    <form method='post'>
-                      <input type='hidden' name='form_type' value='update'>
-                      <input type='hidden' name='absence_id' value='{{ r.id }}'>
-                      <label>Élève</label>
-                      <select name='student_id' required>
-                        {% for s in students %}
-                          <option value='{{ s.id }}' {% if r.student_id == s.id %}selected{% endif %}>{{ s.full_name }}</option>
-                        {% endfor %}
-                      </select>
-                      <label>Date</label><input type='date' name='absence_date' value='{{ r.absence_date }}' required>
-                      <label>Motif</label><textarea name='reason'>{{ r.reason or "" }}</textarea>
-                      <label>Statut</label>
-                      <select name='status' required>
-                        <option value='Non justifiée' {% if r.status == 'Non justifiée' %}selected{% endif %}>Non justifiée</option>
-                        <option value='Justifiée' {% if r.status == 'Justifiée' %}selected{% endif %}>Justifiée</option>
-                      </select>
-                      <div class='actions-inline'><button type='submit'>Modifier</button></div>
-                    </form>
-                    <form method='post' onsubmit="return confirm('Supprimer cette absence ?');" style='margin-top:10px;'>
-                      <input type='hidden' name='form_type' value='delete'>
-                      <input type='hidden' name='absence_id' value='{{ r.id }}'>
-                      <button type='submit' class='danger'>Supprimer</button>
-                    </form>
-                  </div>
-                </td>
-              </tr>
+              <tr><td colspan='6'>
+                <div class='admin-box'>
+                  <form method='post'>
+                    <input type='hidden' name='form_type' value='update'>
+                    <input type='hidden' name='absence_id' value='{{ r.id }}'>
+                    <label>Élève</label>
+                    <select name='student_id' required>{% for s in students %}<option value='{{ s.id }}' {% if r.student_id == s.id %}selected{% endif %}>{{ s.full_name }}</option>{% endfor %}</select>
+                    <label>Date</label><input type='date' name='absence_date' value='{{ r.absence_date }}' required>
+                    <label>Motif</label><textarea name='reason'>{{ r.reason or "" }}</textarea>
+                    <label>Statut</label>
+                    <select name='status' required>
+                      <option value='Non justifiée' {% if r.status == 'Non justifiée' %}selected{% endif %}>Non justifiée</option>
+                      <option value='Justifiée' {% if r.status == 'Justifiée' %}selected{% endif %}>Justifiée</option>
+                    </select>
+                    <div class='actions-inline'><button type='submit'>Modifier</button></div>
+                  </form>
+                  <form method='post' onsubmit="return confirm('Supprimer cette absence ?');" style='margin-top:10px;'>
+                    <input type='hidden' name='form_type' value='delete'>
+                    <input type='hidden' name='absence_id' value='{{ r.id }}'>
+                    <button type='submit' class='danger'>Supprimer</button>
+                  </form>
+                </div>
+              </td></tr>
               {% endif %}
             {% else %}
               <tr><td colspan='6'>Aucune absence.</td></tr>
@@ -2489,10 +2118,7 @@ def messages_page():
     user = g.user
 
     if user["role"] == "eleve":
-        contacts = query_all(
-            "SELECT id, full_name, role FROM users WHERE id != ? ORDER BY full_name",
-            (user["id"],)
-        )
+        contacts = query_all("SELECT id, full_name, role FROM users WHERE id != ? ORDER BY full_name", (user["id"],))
     elif user["role"] == "parent":
         children = get_parent_children(user)
         child_ids = [child["id"] for child in children]
@@ -2511,16 +2137,13 @@ def messages_page():
         receiver_id = request.form.get("receiver_id")
         subject = request.form.get("subject", "").strip()
         body = request.form.get("body", "").strip()
-
         if not receiver_id or not subject or not body:
             flash("Remplis tous les champs du message.")
             return redirect(url_for("messages_page"))
-
         target_user = query_one("SELECT id FROM users WHERE id = ?", (receiver_id,))
         if not target_user:
             flash("Destinataire introuvable.")
             return redirect(url_for("messages_page"))
-
         execute_db(
             "INSERT INTO messages (sender_id, receiver_id, subject, body, created_at) VALUES (?, ?, ?, ?, ?)",
             (user["id"], receiver_id, subject, body, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
@@ -2531,9 +2154,7 @@ def messages_page():
     inbox = query_all(
         """
         SELECT m.*, s.full_name AS sender_name, r.full_name AS receiver_name
-        FROM messages m
-        JOIN users s ON s.id = m.sender_id
-        JOIN users r ON r.id = m.receiver_id
+        FROM messages m JOIN users s ON s.id = m.sender_id JOIN users r ON r.id = m.receiver_id
         WHERE m.receiver_id = ? OR m.sender_id = ?
         ORDER BY m.id DESC
         """,
@@ -2546,15 +2167,9 @@ def messages_page():
         <h2>Nouveau message</h2>
         <form method='post'>
           <label>Destinataire</label>
-          <select name='receiver_id' required>
-            {% for c in contacts %}
-              <option value='{{ c.id }}'>{{ c.full_name }} ({{ c.role }})</option>
-            {% endfor %}
-          </select>
-          <label>Sujet</label>
-          <input name='subject' required>
-          <label>Message</label>
-          <textarea name='body' required></textarea>
+          <select name='receiver_id' required>{% for c in contacts %}<option value='{{ c.id }}'>{{ c.full_name }} ({{ c.role }})</option>{% endfor %}</select>
+          <label>Sujet</label><input name='subject' required>
+          <label>Message</label><textarea name='body' required></textarea>
           <button type='submit'>Envoyer</button>
         </form>
       </div>
@@ -2601,19 +2216,15 @@ def manage_users():
             if not username or not password or not full_name or role not in ["admin", "prof", "eleve", "parent"]:
                 flash("Champs invalides.")
                 return redirect(url_for("manage_users"))
-
             if user["role"] == "prof" and role == "admin":
                 flash("Un professeur ne peut pas créer un compte admin.")
                 return redirect(url_for("manage_users"))
-
             if role == "parent" and not child_id and not child_id_2:
                 flash("Un parent doit être lié à au moins un élève.")
                 return redirect(url_for("manage_users"))
-
             if child_id and child_id_2 and child_id == child_id_2:
                 flash("Tu ne peux pas choisir deux fois le même enfant.")
                 return redirect(url_for("manage_users"))
-
             if role == "parent":
                 class_id = None
             else:
@@ -2622,13 +2233,12 @@ def manage_users():
 
             try:
                 execute_db(
-                    "INSERT INTO users (username, password, role, full_name, class_id, child_id, child_id_2, profile_picture) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+                    "INSERT INTO users (username, password, role, full_name, class_id, child_id, child_id_2, profile_picture, profile_picture_url) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
                     (username, generate_password_hash(password), role, full_name, class_id, child_id, child_id_2),
                 )
                 flash("Utilisateur ajouté.")
             except Exception:
                 flash("Nom d'utilisateur déjà utilisé.")
-
             return redirect(url_for("manage_users"))
 
         elif form_type == "update":
@@ -2637,7 +2247,6 @@ def manage_users():
             if not target_user:
                 flash("Utilisateur introuvable.")
                 return redirect(url_for("manage_users"))
-
             if target_user["role"] == "admin" and user["role"] != "admin":
                 flash("Seul l'admin peut modifier un compte admin.")
                 return redirect(url_for("manage_users"))
@@ -2653,11 +2262,9 @@ def manage_users():
             if not new_username or not new_full_name or new_role not in ["admin", "prof", "eleve", "parent"]:
                 flash("Champs invalides.")
                 return redirect(url_for("manage_users"))
-
             if user["role"] == "prof" and new_role == "admin":
                 flash("Un professeur ne peut pas promouvoir en admin.")
                 return redirect(url_for("manage_users"))
-
             if new_role == "parent":
                 if not new_child_id and not new_child_id_2:
                     flash("Un parent doit être lié à au moins un élève.")
@@ -2676,46 +2283,36 @@ def manage_users():
                     (new_username, new_full_name, new_role, new_class_id, new_child_id, new_child_id_2, target_user_id),
                 )
                 if new_password:
-                    execute_db(
-                        "UPDATE users SET password = ? WHERE id = ?",
-                        (generate_password_hash(new_password), target_user_id),
-                    )
+                    execute_db("UPDATE users SET password = ? WHERE id = ?", (generate_password_hash(new_password), target_user_id))
                 flash("Utilisateur modifié.")
             except Exception:
                 flash("Nom d'utilisateur déjà utilisé ou modification impossible.")
-
             return redirect(url_for("manage_users"))
 
         elif form_type == "delete":
             target_user_id = request.form.get("user_id")
             target_user = query_one("SELECT * FROM users WHERE id = ?", (target_user_id,))
-
             if not target_user:
                 flash("Utilisateur introuvable.")
                 return redirect(url_for("manage_users"))
-
             if str(target_user["username"]) == "admin":
                 flash("Impossible de supprimer le compte admin.")
                 return redirect(url_for("manage_users"))
-
             if str(target_user["id"]) == str(user["id"]):
-                flash("Tu ne peux pas supprimer ton propre compte pendant que tu es connecté.")
+                flash("Tu ne peux pas supprimer ton propre compte.")
                 return redirect(url_for("manage_users"))
-
             if target_user["role"] == "admin" and user["role"] != "admin":
                 flash("Seul l'admin peut supprimer un compte admin.")
                 return redirect(url_for("manage_users"))
-
             if target_user.get("profile_picture"):
-                delete_uploaded_file_if_exists(target_user["profile_picture"])
-
+                delete_from_cloudinary(target_user["profile_picture"], resource_type="image")
             execute_db("DELETE FROM users WHERE id = ?", (target_user_id,))
             flash("Utilisateur supprimé.")
             return redirect(url_for("manage_users"))
 
     users = query_all(
         """
-        SELECT u.id, u.username, u.full_name, u.role, u.profile_picture, u.class_id, u.child_id, u.child_id_2,
+        SELECT u.id, u.username, u.full_name, u.role, u.profile_picture, u.profile_picture_url, u.class_id, u.child_id, u.child_id_2,
                c.name AS class_name, child.full_name AS child_name, child2.full_name AS child_name_2
         FROM users u
         LEFT JOIN classes c ON c.id = u.class_id
@@ -2741,136 +2338,73 @@ def manage_users():
             <option value='parent'>Parent</option>
             {% if user.role == 'admin' %}<option value='admin'>Admin</option>{% endif %}
           </select>
-
           <div id='manage_class_block'>
             <label>Classe</label>
-            <select name='class_id'>
-              <option value=''>Aucune</option>
-              {% for c in classes %}<option value='{{ c.id }}'>{{ c.name }}</option>{% endfor %}
-            </select>
+            <select name='class_id'><option value=''>Aucune</option>{% for c in classes %}<option value='{{ c.id }}'>{{ c.name }}</option>{% endfor %}</select>
           </div>
-
           <div id='manage_child_block' style='display:none;'>
             <label>Enfant lié 1</label>
-            <select name='child_id'>
-              <option value=''>Aucun</option>
-              {% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}</option>{% endfor %}
-            </select>
+            <select name='child_id'><option value=''>Aucun</option>{% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}</option>{% endfor %}</select>
             <label>Enfant lié 2</label>
-            <select name='child_id_2'>
-              <option value=''>Aucun</option>
-              {% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}</option>{% endfor %}
-            </select>
+            <select name='child_id_2'><option value=''>Aucun</option>{% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}</option>{% endfor %}</select>
           </div>
-
           <button type='submit'>Créer</button>
         </form>
       </div>
-
       <div class='card'>
         <h2>Liste des utilisateurs</h2>
         <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Photo</th>
-              <th>Nom</th>
-              <th>Utilisateur</th>
-              <th>Rôle</th>
-              <th>Classe</th>
-              <th>Enfant lié 1</th>
-              <th>Enfant lié 2</th>
-            </tr>
-          </thead>
+          <thead><tr><th>ID</th><th>Photo</th><th>Nom</th><th>Utilisateur</th><th>Rôle</th><th>Classe</th><th>Enfant 1</th><th>Enfant 2</th></tr></thead>
           <tbody>
             {% for u in users %}
             <tr>
               <td>{{ u.id }}</td>
               <td>
-                {% if u.profile_picture and file_exists_in_uploads(u.profile_picture) %}
-                  <img src='{{ url_for("uploaded_file", filename=u.profile_picture) }}' class='avatar' alt='Photo'>
+                {% if u.profile_picture_url %}
+                  <img src='{{ u.profile_picture_url }}' class='avatar' alt='Photo'>
                 {% else %}
-                  <div class='avatar' style='display:flex; align-items:center; justify-content:center; color:#1d4ed8; font-size:18px; font-weight:800;'>
-                    {{ u.full_name[:1] }}
-                  </div>
+                  <div class='avatar' style='display:flex; align-items:center; justify-content:center; color:#1d4ed8; font-size:18px; font-weight:800;'>{{ u.full_name[:1] }}</div>
                 {% endif %}
               </td>
-              <td>{{ u.full_name }}</td>
-              <td>{{ u.username }}</td>
-              <td>{{ u.role }}</td>
-              <td>{{ u.class_name or '-' }}</td>
-              <td>{{ u.child_name or '-' }}</td>
-              <td>{{ u.child_name_2 or '-' }}</td>
+              <td>{{ u.full_name }}</td><td>{{ u.username }}</td><td>{{ u.role }}</td>
+              <td>{{ u.class_name or '-' }}</td><td>{{ u.child_name or '-' }}</td><td>{{ u.child_name_2 or '-' }}</td>
             </tr>
-            <tr>
-              <td colspan='8'>
-                <div class='admin-box'>
-                  <form method='post'>
-                    <input type='hidden' name='form_type' value='update'>
-                    <input type='hidden' name='user_id' value='{{ u.id }}'>
-
-                    <label>Nom complet</label>
-                    <input name='edit_full_name' value='{{ u.full_name }}' required>
-
-                    <label>Nom d'utilisateur</label>
-                    <input name='edit_username' value='{{ u.username }}' required>
-
-                    <label>Rôle</label>
-                    <select name='edit_role' required>
-                      <option value='eleve' {% if u.role == 'eleve' %}selected{% endif %}>Élève</option>
-                      <option value='prof' {% if u.role == 'prof' %}selected{% endif %}>Professeur</option>
-                      <option value='parent' {% if u.role == 'parent' %}selected{% endif %}>Parent</option>
-                      {% if user.role == 'admin' %}
-                      <option value='admin' {% if u.role == 'admin' %}selected{% endif %}>Admin</option>
-                      {% endif %}
-                    </select>
-
-                    <label>Nouvelle classe</label>
-                    <select name='edit_class_id'>
-                      <option value=''>Aucune</option>
-                      {% for c in classes %}
-                        <option value='{{ c.id }}' {% if u.class_id == c.id %}selected{% endif %}>{{ c.name }}</option>
-                      {% endfor %}
-                    </select>
-
-                    <label>Enfant lié 1</label>
-                    <select name='edit_child_id'>
-                      <option value=''>Aucun</option>
-                      {% for s in students %}
-                        <option value='{{ s.id }}' {% if u.child_id == s.id %}selected{% endif %}>{{ s.full_name }}</option>
-                      {% endfor %}
-                    </select>
-
-                    <label>Enfant lié 2</label>
-                    <select name='edit_child_id_2'>
-                      <option value=''>Aucun</option>
-                      {% for s in students %}
-                        <option value='{{ s.id }}' {% if u.child_id_2 == s.id %}selected{% endif %}>{{ s.full_name }}</option>
-                      {% endfor %}
-                    </select>
-
-                    <label>Réinitialiser le mot de passe</label>
-                    <input name='reset_password' placeholder='Laisse vide pour ne pas changer'>
-
-                    <div class='actions-inline'>
-                      <button type='submit'>Modifier</button>
-                    </div>
-                  </form>
-
-                  <form method='post' onsubmit="return confirm('Supprimer ce compte ?');" style='margin-top:10px;'>
-                    <input type='hidden' name='form_type' value='delete'>
-                    <input type='hidden' name='user_id' value='{{ u.id }}'>
-                    <button type='submit' class='danger'>Supprimer</button>
-                  </form>
-                </div>
-              </td>
-            </tr>
+            <tr><td colspan='8'>
+              <div class='admin-box'>
+                <form method='post'>
+                  <input type='hidden' name='form_type' value='update'>
+                  <input type='hidden' name='user_id' value='{{ u.id }}'>
+                  <label>Nom complet</label><input name='edit_full_name' value='{{ u.full_name }}' required>
+                  <label>Nom d'utilisateur</label><input name='edit_username' value='{{ u.username }}' required>
+                  <label>Rôle</label>
+                  <select name='edit_role' required>
+                    <option value='eleve' {% if u.role == 'eleve' %}selected{% endif %}>Élève</option>
+                    <option value='prof' {% if u.role == 'prof' %}selected{% endif %}>Professeur</option>
+                    <option value='parent' {% if u.role == 'parent' %}selected{% endif %}>Parent</option>
+                    {% if user.role == 'admin' %}<option value='admin' {% if u.role == 'admin' %}selected{% endif %}>Admin</option>{% endif %}
+                  </select>
+                  <label>Classe</label>
+                  <select name='edit_class_id'><option value=''>Aucune</option>{% for c in classes %}<option value='{{ c.id }}' {% if u.class_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select>
+                  <label>Enfant lié 1</label>
+                  <select name='edit_child_id'><option value=''>Aucun</option>{% for s in students %}<option value='{{ s.id }}' {% if u.child_id == s.id %}selected{% endif %}>{{ s.full_name }}</option>{% endfor %}</select>
+                  <label>Enfant lié 2</label>
+                  <select name='edit_child_id_2'><option value=''>Aucun</option>{% for s in students %}<option value='{{ s.id }}' {% if u.child_id_2 == s.id %}selected{% endif %}>{{ s.full_name }}</option>{% endfor %}</select>
+                  <label>Réinitialiser le mot de passe</label>
+                  <input name='reset_password' placeholder='Laisse vide pour ne pas changer'>
+                  <div class='actions-inline'><button type='submit'>Modifier</button></div>
+                </form>
+                <form method='post' onsubmit="return confirm('Supprimer ce compte ?');" style='margin-top:10px;'>
+                  <input type='hidden' name='form_type' value='delete'>
+                  <input type='hidden' name='user_id' value='{{ u.id }}'>
+                  <button type='submit' class='danger'>Supprimer</button>
+                </form>
+              </div>
+            </td></tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
     </div>
-
     <script>
       function toggleManageFields() {
         const role = document.getElementById('manage_role_select').value;
@@ -2880,15 +2414,7 @@ def manage_users():
       toggleManageFields();
     </script>
     """
-    return render_page(
-        content,
-        title="Comptes",
-        users=users,
-        user=user,
-        classes=classes,
-        students=students,
-        file_exists_in_uploads=file_exists_in_uploads,
-    )
+    return render_page(content, title="Comptes", users=users, user=user, classes=classes, students=students)
 
 
 # =========================
@@ -2917,10 +2443,9 @@ def manage_school():
 
         if form_type == "delete_class":
             class_id = request.form.get("class_id")
-            linked_users = query_one("SELECT COUNT(*) AS total FROM users WHERE class_id = ?", (class_id,))["total"]
-            linked_homework = query_one("SELECT COUNT(*) AS total FROM homework WHERE class_id = ?", (class_id,))["total"]
-            linked_schedule = query_one("SELECT COUNT(*) AS total FROM schedules WHERE class_id = ?", (class_id,))["total"]
-            if linked_users or linked_homework or linked_schedule:
+            if (query_one("SELECT COUNT(*) AS t FROM users WHERE class_id = ?", (class_id,))["t"] or
+                query_one("SELECT COUNT(*) AS t FROM homework WHERE class_id = ?", (class_id,))["t"] or
+                query_one("SELECT COUNT(*) AS t FROM schedules WHERE class_id = ?", (class_id,))["t"]):
                 flash("Impossible de supprimer cette classe : elle est encore utilisée.")
                 return redirect(url_for("manage_school"))
             execute_db("DELETE FROM classes WHERE id = ?", (class_id,))
@@ -2929,10 +2454,9 @@ def manage_school():
 
         if form_type == "delete_subject":
             subject_id = request.form.get("subject_id")
-            linked_grades = query_one("SELECT COUNT(*) AS total FROM grades WHERE subject_id = ?", (subject_id,))["total"]
-            linked_homework = query_one("SELECT COUNT(*) AS total FROM homework WHERE subject_id = ?", (subject_id,))["total"]
-            linked_schedule = query_one("SELECT COUNT(*) AS total FROM schedules WHERE subject_id = ?", (subject_id,))["total"]
-            if linked_grades or linked_homework or linked_schedule:
+            if (query_one("SELECT COUNT(*) AS t FROM grades WHERE subject_id = ?", (subject_id,))["t"] or
+                query_one("SELECT COUNT(*) AS t FROM homework WHERE subject_id = ?", (subject_id,))["t"] or
+                query_one("SELECT COUNT(*) AS t FROM schedules WHERE subject_id = ?", (subject_id,))["t"]):
                 flash("Impossible de supprimer cette matière : elle est encore utilisée.")
                 return redirect(url_for("manage_school"))
             execute_db("DELETE FROM subjects WHERE id = ?", (subject_id,))
@@ -2948,8 +2472,7 @@ def manage_school():
         <h2>Ajouter une classe</h2>
         <form method='post'>
           <input type='hidden' name='form_type' value='class'>
-          <label>Nom de la classe</label>
-          <input name='name' placeholder='6A' required>
+          <label>Nom de la classe</label><input name='name' placeholder='6A' required>
           <button type='submit'>Ajouter la classe</button>
         </form>
       </div>
@@ -2957,8 +2480,7 @@ def manage_school():
         <h2>Ajouter une matière</h2>
         <form method='post'>
           <input type='hidden' name='form_type' value='subject'>
-          <label>Nom de la matière</label>
-          <input name='name' placeholder='Physique' required>
+          <label>Nom de la matière</label><input name='name' placeholder='Physique' required>
           <button type='submit'>Ajouter la matière</button>
         </form>
       </div>
@@ -2968,31 +2490,27 @@ def manage_school():
         <h2>Classes</h2>
         {% for c in classes %}
           <div style='display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid #eef3fb;'>
-            <div><strong>{{ c.name }}</strong></div>
+            <strong>{{ c.name }}</strong>
             <form method='post' style='margin:0;'>
               <input type='hidden' name='form_type' value='delete_class'>
               <input type='hidden' name='class_id' value='{{ c.id }}'>
               <button type='submit' class='danger'>Supprimer</button>
             </form>
           </div>
-        {% else %}
-          <p class='muted'>Aucune classe.</p>
-        {% endfor %}
+        {% else %}<p class='muted'>Aucune classe.</p>{% endfor %}
       </div>
       <div class='card'>
         <h2>Matières</h2>
         {% for s in subjects %}
           <div style='display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px 0; border-bottom:1px solid #eef3fb;'>
-            <div><strong>{{ s.name }}</strong></div>
+            <strong>{{ s.name }}</strong>
             <form method='post' style='margin:0;'>
               <input type='hidden' name='form_type' value='delete_subject'>
               <input type='hidden' name='subject_id' value='{{ s.id }}'>
               <button type='submit' class='danger'>Supprimer</button>
             </form>
           </div>
-        {% else %}
-          <p class='muted'>Aucune matière.</p>
-        {% endfor %}
+        {% else %}<p class='muted'>Aucune matière.</p>{% endfor %}
       </div>
     </div>
     """
