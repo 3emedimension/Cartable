@@ -1803,165 +1803,248 @@ def homework_page():
 # =========================
 # Emploi du temps
 # =========================
-@app.route("/schedule", methods=["GET", "POST"])
+@app.route("/schedule")
 @login_required
 def schedule_page():
-    user = g.user
-    classes = query_all("SELECT id, name FROM classes ORDER BY name")
-    subjects = query_all("SELECT id, name FROM subjects ORDER BY name")
-    teachers = query_all("SELECT id, full_name FROM users WHERE role IN ('prof', 'admin') ORDER BY full_name")
+    semaine = request.args.get("semaine", "A").upper()
+    if semaine not in ["A", "B"]:
+        semaine = "A"
 
-    if request.method == "POST":
-        form_type = request.form.get("form_type", "create").strip()
+    edt = {
+        "A": {
+            "Lundi": [
+                ("8h30 - 8h45", "Point travail maison", "Christelle"),
+                ("8h45 - 9h15", "Sophrologie", ""),
+                ("9h15 - 10h15", "Français (grammaire)", ""),
+                ("10h15 - 10h30", "Récréation", ""),
+                ("10h30 - 12h40", "Français (étude de textes)", ""),
+                ("12h40 - 13h30", "Pause déjeuner", ""),
+                ("13h30 - 15h00", "Projets interdisciplinaires", ""),
+                ("15h15 - 16h45", "Arts", ""),
+                ("16h45 - 17h00", "Carnet de bord / Agenda", ""),
+            ],
+            "Mardi": [
+                ("8h30 - 9h00", "Rituels (Flow & Voix)", ""),
+                ("9h00 - 12h40", "Enquêtes et jeux", "Histoire / Géo / Citoyen du monde"),
+                ("10h15 - 10h30", "Récréation", ""),
+                ("12h40 - 13h30", "Pause déjeuner", ""),
+                ("13h30 - 14h15", "Enquêtes et jeux", ""),
+                ("14h15 - 15h00", "Espagnol", "Angélique"),
+                ("15h00 - 15h15", "Récréation", ""),
+                ("15h15 - 16h45", "EPS", "Mathéo"),
+                ("16h45 - 17h00", "Carnet de bord", ""),
+            ],
+        },
+        "B": {
+            "Lundi": [
+                ("8h30 - 9h15", "Point travail + Rituels", "Christelle"),
+                ("9h15 - 10h15", "Français (grammaire)", ""),
+                ("10h15 - 10h30", "Récréation", ""),
+                ("10h30 - 12h40", "Français (étude de textes)", ""),
+                ("12h40 - 13h30", "Pause déjeuner", ""),
+                ("13h30 - 15h00", "Projets interdisciplinaires", ""),
+                ("15h15 - 16h45", "Arts", ""),
+                ("16h45 - 17h00", "Carnet de bord / Agenda", ""),
+            ],
+            "Mardi": [
+                ("8h30 - 9h00", "Rituels (Flow & Voix)", ""),
+                ("9h00 - 12h40", "Enquêtes et jeux", ""),
+                ("10h15 - 10h30", "Récréation", ""),
+                ("12h40 - 13h30", "Pause déjeuner", ""),
+                ("13h30 - 14h15", "Yoga", "Julie"),
+                ("14h15 - 15h00", "Espagnol", "Angélique"),
+                ("15h00 - 15h15", "Récréation", ""),
+                ("15h15 - 16h45", "EPS", "Mathéo"),
+                ("16h45 - 17h00", "Carnet de bord", ""),
+            ],
+        },
+        "COMMUN": {
+            "Jeudi": [
+                ("8h30 - 10h00", "Mathématiques", ""),
+                ("10h15 - 12h30", "Sciences", ""),
+                ("13h30 - 15h00", "Sciences", ""),
+                ("15h15 - 16h15", "Espagnol", "Angélique"),
+                ("16h15 - 17h00", "Anglais", ""),
+            ],
+            "Vendredi": [
+                ("8h30 - 10h00", "Anglais", ""),
+                ("10h15 - 12h30", "Mathématiques", ""),
+                ("13h30 - 15h00", "Théâtre / Travaux", "Renaud"),
+                ("15h15 - 16h45", "EPS", "Mathéo"),
+            ],
+        },
+    }
 
-        if form_type == "create":
-            if user["role"] != "admin":
-                flash("Seul l'admin peut ajouter un cours.")
-                return redirect(url_for("schedule_page"))
-            execute_db(
-                "INSERT INTO schedules (class_id, subject_id, teacher_id, day_name, start_time, end_time, room) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    request.form.get("class_id"),
-                    request.form.get("subject_id"),
-                    request.form.get("teacher_id"),
-                    request.form.get("day_name"),
-                    request.form.get("start_time"),
-                    request.form.get("end_time"),
-                    request.form.get("room", "").strip(),
-                ),
-            )
-            flash("Cours ajouté.")
-            return redirect(url_for("schedule_page"))
+    html = BASE_TOP + NAV + """
+    <style>
+        .edt-wrap{
+            max-width:1200px;
+            margin:30px auto;
+            padding:20px;
+        }
 
-        elif form_type == "update":
-            if user["role"] != "admin":
-                flash("Accès refusé.")
-                return redirect(url_for("schedule_page"))
-            schedule_id = request.form.get("schedule_id")
-            execute_db(
-                "UPDATE schedules SET class_id = ?, subject_id = ?, teacher_id = ?, day_name = ?, start_time = ?, end_time = ?, room = ? WHERE id = ?",
-                (
-                    request.form.get("class_id"),
-                    request.form.get("subject_id"),
-                    request.form.get("teacher_id"),
-                    request.form.get("day_name"),
-                    request.form.get("start_time"),
-                    request.form.get("end_time"),
-                    request.form.get("room", "").strip(),
-                    schedule_id,
-                ),
-            )
-            flash("Cours modifié.")
-            return redirect(url_for("schedule_page"))
+        .edt-title{
+            text-align:center;
+            font-size:32px;
+            font-weight:800;
+            color:#123c7a;
+            margin-bottom:10px;
+        }
 
-        elif form_type == "delete":
-            if user["role"] != "admin":
-                flash("Accès refusé.")
-                return redirect(url_for("schedule_page"))
-            execute_db("DELETE FROM schedules WHERE id = ?", (request.form.get("schedule_id"),))
-            flash("Cours supprimé.")
-            return redirect(url_for("schedule_page"))
+        .edt-subtitle{
+            text-align:center;
+            color:#5d6b82;
+            margin-bottom:25px;
+            font-size:15px;
+        }
 
-    if user["role"] == "eleve":
-        target_class_ids = [user["class_id"]] if user.get("class_id") else []
-    elif user["role"] == "parent":
-        target_class_ids = []
-        for child in get_parent_children(user):
-            if child.get("class_id") and child["class_id"] not in target_class_ids:
-                target_class_ids.append(child["class_id"])
-    else:
-        target_class_ids = []
+        .week-switch{
+            display:flex;
+            justify-content:center;
+            gap:12px;
+            margin-bottom:30px;
+            flex-wrap:wrap;
+        }
 
-    order_clause = """
-        ORDER BY c.name,
-          CASE sc.day_name WHEN 'Lundi' THEN 1 WHEN 'Mardi' THEN 2 WHEN 'Mercredi' THEN 3 WHEN 'Jeudi' THEN 4 WHEN 'Vendredi' THEN 5 ELSE 6 END,
-          sc.start_time
-    """
+        .week-btn{
+            text-decoration:none;
+            padding:12px 22px;
+            border-radius:14px;
+            font-weight:700;
+            background:linear-gradient(135deg,#e8f1ff,#d8ebff);
+            color:#124a9c;
+            box-shadow:0 8px 20px rgba(0,0,0,0.08);
+            transition:0.2s;
+        }
 
-    if user["role"] in ["eleve", "parent"]:
-        if target_class_ids:
-            placeholders = ",".join(["?"] * len(target_class_ids))
-            rows = query_all(
-                f"""
-                SELECT sc.*, s.name AS subject_name, u.full_name AS teacher_name, c.name AS class_name
-                FROM schedules sc JOIN subjects s ON s.id = sc.subject_id JOIN users u ON u.id = sc.teacher_id JOIN classes c ON c.id = sc.class_id
-                WHERE sc.class_id IN ({placeholders}) {order_clause}
-                """,
-                tuple(target_class_ids),
-            )
-        else:
-            rows = []
-    else:
-        rows = query_all(
-            f"""
-            SELECT sc.*, s.name AS subject_name, u.full_name AS teacher_name, c.name AS class_name
-            FROM schedules sc JOIN subjects s ON s.id = sc.subject_id JOIN users u ON u.id = sc.teacher_id JOIN classes c ON c.id = sc.class_id
-            {order_clause}
-            """
-        )
+        .week-btn:hover{
+            transform:translateY(-2px);
+        }
 
-    content = """
-    <div class='grid'>
-      {% if user.role == 'admin' %}
-      <div class='card'>
-        <h2>Ajouter un cours</h2>
-        <form method='post'>
-          <input type='hidden' name='form_type' value='create'>
-          <label>Classe</label><select name='class_id' required>{% for c in classes %}<option value='{{ c.id }}'>{{ c.name }}</option>{% endfor %}</select>
-          <label>Matière</label><select name='subject_id' required>{% for s in subjects %}<option value='{{ s.id }}'>{{ s.name }}</option>{% endfor %}</select>
-          <label>Professeur</label><select name='teacher_id' required>{% for t in teachers %}<option value='{{ t.id }}'>{{ t.full_name }}</option>{% endfor %}</select>
-          <label>Jour</label><select name='day_name' required><option>Lundi</option><option>Mardi</option><option>Mercredi</option><option>Jeudi</option><option>Vendredi</option></select>
-          <label>Début</label><input type='time' name='start_time' required>
-          <label>Fin</label><input type='time' name='end_time' required>
-          <label>Salle</label><input name='room'>
-          <button type='submit'>Ajouter</button>
-        </form>
-      </div>
-      {% endif %}
-      <div class='card'>
-        <h1>Emploi du temps</h1>
-        <table>
-          <thead><tr><th>Classe</th><th>Jour</th><th>Horaire</th><th>Matière</th><th>Prof</th><th>Salle</th></tr></thead>
-          <tbody>
-            {% for r in rows %}
-              <tr><td>{{ r.class_name }}</td><td>{{ r.day_name }}</td><td>{{ r.start_time }} - {{ r.end_time }}</td><td>{{ r.subject_name }}</td><td>{{ r.teacher_name }}</td><td>{{ r.room or '-' }}</td></tr>
-              {% if user.role == 'admin' %}
-              <tr><td colspan='6'>
-                <div class='admin-box'>
-                  <form method='post'>
-                    <input type='hidden' name='form_type' value='update'>
-                    <input type='hidden' name='schedule_id' value='{{ r.id }}'>
-                    <label>Classe</label><select name='class_id' required>{% for c in classes %}<option value='{{ c.id }}' {% if r.class_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}</select>
-                    <label>Matière</label><select name='subject_id' required>{% for s in subjects %}<option value='{{ s.id }}' {% if r.subject_id == s.id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}</select>
-                    <label>Professeur</label><select name='teacher_id' required>{% for t in teachers %}<option value='{{ t.id }}' {% if r.teacher_id == t.id %}selected{% endif %}>{{ t.full_name }}</option>{% endfor %}</select>
-                    <label>Jour</label>
-                    <select name='day_name' required>
-                      {% for day in ['Lundi','Mardi','Mercredi','Jeudi','Vendredi'] %}
-                        <option value='{{ day }}' {% if r.day_name == day %}selected{% endif %}>{{ day }}</option>
-                      {% endfor %}
-                    </select>
-                    <label>Début</label><input type='time' name='start_time' value='{{ r.start_time }}' required>
-                    <label>Fin</label><input type='time' name='end_time' value='{{ r.end_time }}' required>
-                    <label>Salle</label><input name='room' value='{{ r.room or "" }}'>
-                    <div class='actions-inline'><button type='submit'>Modifier</button></div>
-                  </form>
-                  <form method='post' onsubmit="return confirm('Supprimer ce cours ?');" style='margin-top:10px;'>
-                    <input type='hidden' name='form_type' value='delete'>
-                    <input type='hidden' name='schedule_id' value='{{ r.id }}'>
-                    <button type='submit' class='danger'>Supprimer</button>
-                  </form>
+        .week-btn.active{
+            background:linear-gradient(135deg,#1f6feb,#4ea1ff);
+            color:white;
+        }
+
+        .days-grid{
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+            gap:22px;
+        }
+
+        .day-card{
+            background:white;
+            border-radius:22px;
+            overflow:hidden;
+            box-shadow:0 10px 30px rgba(20, 60, 120, 0.10);
+            border:1px solid #e6eef8;
+        }
+
+        .day-header{
+            padding:16px 18px;
+            color:white;
+            font-size:20px;
+            font-weight:800;
+        }
+
+        .lundi{background:linear-gradient(135deg,#3b82f6,#2563eb);}
+        .mardi{background:linear-gradient(135deg,#10b981,#059669);}
+        .jeudi{background:linear-gradient(135deg,#f59e0b,#d97706);}
+        .vendredi{background:linear-gradient(135deg,#ef4444,#dc2626);}
+
+        .course{
+            padding:14px 16px;
+            border-bottom:1px solid #edf2f7;
+        }
+
+        .course:last-child{
+            border-bottom:none;
+        }
+
+        .hour{
+            display:inline-block;
+            font-size:13px;
+            font-weight:700;
+            color:#2563eb;
+            background:#eef5ff;
+            padding:6px 10px;
+            border-radius:999px;
+            margin-bottom:8px;
+        }
+
+        .subject{
+            font-size:16px;
+            font-weight:800;
+            color:#1f2937;
+            margin-bottom:4px;
+        }
+
+        .teacher{
+            font-size:13px;
+            color:#6b7280;
+        }
+
+        .pause .subject{
+            color:#9a6700;
+        }
+
+        .recre .subject{
+            color:#0f766e;
+        }
+
+        @media (max-width:700px){
+            .edt-title{
+                font-size:25px;
+            }
+            .edt-wrap{
+                padding:12px;
+            }
+        }
+    </style>
+
+    <div class="edt-wrap">
+        <div class="edt-title">Emploi du temps</div>
+        <div class="edt-subtitle">
+            Semaine {{ semaine }} — alternance uniquement pour le lundi et le mardi
+        </div>
+
+        <div class="week-switch">
+            <a href="{{ url_for('schedule_page', semaine='A') }}" class="week-btn {% if semaine == 'A' %}active{% endif %}">Semaine A</a>
+            <a href="{{ url_for('schedule_page', semaine='B') }}" class="week-btn {% if semaine == 'B' %}active{% endif %}">Semaine B</a>
+        </div>
+
+        <div class="days-grid">
+            {% for jour, cours in jours_affiches %}
+                {% set css = jour.lower() %}
+                <div class="day-card">
+                    <div class="day-header {{ css }}">{{ jour }}</div>
+
+                    {% for heure, matiere, prof in cours %}
+                        <div class="course
+                            {% if 'Pause' in matiere %}pause{% endif %}
+                            {% if 'Récréation' in matiere %}recre{% endif %}
+                        ">
+                            <div class="hour">{{ heure }}</div>
+                            <div class="subject">{{ matiere }}</div>
+                            {% if prof %}
+                                <div class="teacher">{{ prof }}</div>
+                            {% endif %}
+                        </div>
+                    {% endfor %}
                 </div>
-              </td></tr>
-              {% endif %}
-            {% else %}
-              <tr><td colspan='6'>Aucun cours programmé.</td></tr>
             {% endfor %}
-          </tbody>
-        </table>
-      </div>
+        </div>
     </div>
     """
-    return render_page(content, title="Emploi du temps", user=user, rows=rows, classes=classes, subjects=subjects, teachers=teachers)
+
+    jours_affiches = [
+        ("Lundi", edt[semaine]["Lundi"]),
+        ("Mardi", edt[semaine]["Mardi"]),
+        ("Jeudi", edt["COMMUN"]["Jeudi"]),
+        ("Vendredi", edt["COMMUN"]["Vendredi"]),
+    ]
+
+    return render_template_string(html, semaine=semaine, jours_affiches=jours_affiches)
 
 
 # =========================
