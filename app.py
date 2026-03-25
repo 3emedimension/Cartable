@@ -36,6 +36,8 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 USE_POSTGRES = bool(DATABASE_URL and psycopg2)
 DB_NAME = "mini_pronote_v10.db"
+ADMIN_DEFAULT_PASSWORD = os.environ.get("ADMIN_PASSWORD", "Azsqerfd2012")
+SITE_PASSWORD = os.environ.get("SITE_PASSWORD", "EcoleR2026")
 
 # =========================
 # Cloudinary configuration
