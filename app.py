@@ -706,6 +706,30 @@ def init_db():
             [("Mathématiques",), ("Français",), ("Histoire",), ("Anglais",), ("SVT",), ("Physique",)],
         )
 
+    # Table notifications vues
+    if not table_exists("notif_seen"):
+        if USE_POSTGRES:
+            execute_db("""
+                CREATE TABLE IF NOT EXISTS notif_seen (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    last_seen_message_id INTEGER NOT NULL DEFAULT 0,
+                    last_seen_grade_id INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(user_id)
+                )
+            """)
+        else:
+            execute_db("""
+                CREATE TABLE IF NOT EXISTS notif_seen (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    last_seen_message_id INTEGER NOT NULL DEFAULT 0,
+                    last_seen_grade_id INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(user_id),
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+            """)
+
     # Table suivi devoirs
     if not table_exists("homework_done"):
         if USE_POSTGRES:
@@ -780,6 +804,7 @@ def load_logged_user():
     session["role"] = user["role"]
     session["full_name"] = user["full_name"]
     g.user = user
+    g.notif_count = get_notifications(user)
 
 
 def login_required(f):
@@ -858,6 +883,48 @@ def scalar(sql, params=(), default=0):
     return next(iter(row.values()))
 
 
+def get_notifications(user):
+    """Retourne le nombre de notifications non lues pour l'utilisateur."""
+    if not user:
+        return 0
+    try:
+        # Messages non lus = messages reçus depuis la dernière visite
+        # On utilise la table notif_seen pour tracker ce qui a été vu
+        total = 0
+        # Nouveaux messages privés non lus
+        seen = query_one("SELECT last_seen_message_id FROM notif_seen WHERE user_id = ?", (user["id"],))
+        last_seen_id = seen["last_seen_message_id"] if seen else 0
+        new_msgs = scalar(
+            "SELECT COUNT(*) AS total FROM messages WHERE receiver_id = ? AND id > ?",
+            (user["id"], last_seen_id), 0
+        )
+        total += new_msgs
+        # Nouvelles notes pour élèves/parents
+        if user["role"] == "eleve":
+            seen_grade = query_one("SELECT last_seen_grade_id FROM notif_seen WHERE user_id = ?", (user["id"],))
+            last_seen_grade = seen_grade["last_seen_grade_id"] if seen_grade else 0
+            new_grades = scalar(
+                "SELECT COUNT(*) AS total FROM grades WHERE student_id = ? AND id > ?",
+                (user["id"], last_seen_grade), 0
+            )
+            total += new_grades
+        elif user["role"] == "parent":
+            children = get_parent_children(user)
+            if children:
+                seen_grade = query_one("SELECT last_seen_grade_id FROM notif_seen WHERE user_id = ?", (user["id"],))
+                last_seen_grade = seen_grade["last_seen_grade_id"] if seen_grade else 0
+                child_ids = [c["id"] for c in children]
+                placeholders = ",".join(["?"] * len(child_ids))
+                new_grades = scalar(
+                    f"SELECT COUNT(*) AS total FROM grades WHERE student_id IN ({placeholders}) AND id > ?",
+                    tuple(child_ids) + (last_seen_grade,), 0
+                )
+                total += new_grades
+        return total
+    except Exception:
+        return 0
+
+
 # =========================
 # UI
 # =========================
@@ -926,6 +993,8 @@ BASE_TOP = """
     .nav-dropdown-menu a { display:block; color:white; text-decoration:none; padding:9px 12px; border-radius:9px; font-size:13px; font-weight:600; }
     .nav-dropdown-menu a:hover { background:rgba(255,255,255,0.1); }
     .nav-right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+    .notif-wrap { position:relative; display:inline-flex; }
+    .notif-badge { position:absolute; top:-5px; right:-5px; background:#ef4444; color:white; border-radius:999px; font-size:10px; font-weight:800; min-width:18px; height:18px; display:flex; align-items:center; justify-content:center; padding:0 4px; border:2px solid #1d4ed8; pointer-events:none; }
     .dark-toggle { width:36px; height:36px; border-radius:50%; background:rgba(255,255,255,0.12); border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:17px; transition:background 0.2s; box-shadow:none; padding:0; }
     .dark-toggle:hover { background:rgba(255,255,255,0.22); transform:none; }
     .user-pill { display:flex; align-items:center; gap:8px; padding:5px 10px 5px 5px; border-radius:999px; background:rgba(255,255,255,0.1); border:none; cursor:pointer; color:white; font-size:13px; font-weight:600; position:relative; box-shadow:none; }
@@ -1006,7 +1075,7 @@ NAV = """
   <div class='nav-right'>
     <button class='dark-toggle' onclick='toggleDark()'>🌙</button>
     {% if session.get('user_id') %}
-    <!-- User pill with dropdown -->
+    <!-- User pill -->
     <div class='user-pill-wrap'>
       <button class='user-pill'>
         {% if g.user and g.user.profile_picture_url %}
@@ -1023,10 +1092,15 @@ NAV = """
         <a href='{{ url_for("logout") }}' style='color:#f87171;'>🚪 Déconnexion</a>
       </div>
     </div>
-    <!-- Burger -->
-    <button class='burger-btn' onclick='openDrawer()' title='Menu'>
-      <span></span><span></span><span></span>
-    </button>
+    <!-- Burger with notif badge -->
+    <div class='notif-wrap'>
+      <button class='burger-btn' onclick='openDrawer()' title='Menu'>
+        <span></span><span></span><span></span>
+      </button>
+      {% if g.notif_count and g.notif_count > 0 %}
+        <span class='notif-badge'>{{ g.notif_count if g.notif_count < 100 else "99+" }}</span>
+      {% endif %}
+    </div>
     {% else %}
     <a href='{{ url_for("login") }}' class='nav-link'>Connexion</a>
     {% endif %}
@@ -1046,10 +1120,13 @@ NAV = """
     {% else %}
       <div style='width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:800;color:white;flex-shrink:0;'>{{ session.get('full_name','?')[:1] }}</div>
     {% endif %}
-    <div>
+    <div style='flex:1;min-width:0;'>
       <div style='color:white;font-weight:700;font-size:15px;'>{{ session.get('full_name','') }}</div>
       <div style='color:rgba(255,255,255,0.5);font-size:12px;'>{{ session.get('role','') }}</div>
     </div>
+    {% if g.notif_count and g.notif_count > 0 %}
+      <span style='background:#ef4444;color:white;border-radius:999px;font-size:11px;font-weight:800;padding:3px 8px;flex-shrink:0;'>{{ g.notif_count }}</span>
+    {% endif %}
   </div>
   <div class='mobile-drawer-section'>
     <span class='mobile-drawer-section-label'>Navigation</span>
@@ -1059,7 +1136,9 @@ NAV = """
     <a href='{{ url_for("homework_page") }}' onclick='closeDrawer()'>📚 Devoirs</a>
     <a href='{{ url_for("schedule_page") }}' onclick='closeDrawer()'>🗓️ Emploi du temps</a>
     <a href='{{ url_for("absences_page") }}' onclick='closeDrawer()'>📋 Absences</a>
-    <a href='{{ url_for("messages_page") }}' onclick='closeDrawer()'>💬 Messagerie</a>
+    <a href='{{ url_for("messages_page") }}' onclick='closeDrawer()'>💬 Messagerie
+      {% if g.notif_count and g.notif_count > 0 %}<span style='background:#ef4444;color:white;border-radius:999px;font-size:10px;font-weight:800;padding:2px 6px;margin-left:6px;'>nouveau</span>{% endif %}
+    </a>
     <a href='{{ url_for("signalement_page") }}' onclick='closeDrawer()'>🚨 Signalement</a>
   </div>
   {% if session.get('role') in ['prof','admin'] %}
@@ -1085,22 +1164,9 @@ NAV = """
 </div>
 {% endif %}
 <script>
-function openDrawer(){
-  document.getElementById('mobileDrawer').classList.add('open');
-  document.getElementById('mobileOverlay').classList.add('show');
-  document.body.style.overflow='hidden';
-}
-function closeDrawer(){
-  document.getElementById('mobileDrawer').classList.remove('open');
-  document.getElementById('mobileOverlay').classList.remove('show');
-  document.body.style.overflow='';
-}
-function toggleDark(){
-  var next=document.documentElement.getAttribute('data-theme')=='dark'?'light':'dark';
-  document.documentElement.setAttribute('data-theme',next);
-  localStorage.setItem('theme',next);
-  document.querySelectorAll('.dark-toggle').forEach(function(b){b.textContent=next==='dark'?'☀️':'🌙';});
-}
+function openDrawer(){document.getElementById('mobileDrawer').classList.add('open');document.getElementById('mobileOverlay').classList.add('show');document.body.style.overflow='hidden';}
+function closeDrawer(){document.getElementById('mobileDrawer').classList.remove('open');document.getElementById('mobileOverlay').classList.remove('show');document.body.style.overflow='';}
+function toggleDark(){var next=document.documentElement.getAttribute('data-theme')=='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',next);localStorage.setItem('theme',next);document.querySelectorAll('.dark-toggle').forEach(function(b){b.textContent=next==='dark'?'☀️':'🌙';});}
 (function(){var t=localStorage.getItem('theme')||'light';document.querySelectorAll('.dark-toggle').forEach(function(b){b.textContent=t==='dark'?'☀️':'🌙';});})();
 </script>
 """
@@ -1468,6 +1534,7 @@ def settings_page():
       <div class='profile-tab' onclick='switchTab("photo")'>🖼️ Photo de profil</div>
       {% if user.role in ['eleve', 'parent'] %}
       <div class='profile-tab' onclick='switchTab("courbe")'>📈 Courbe des notes</div>
+      <div class='profile-tab' onclick='switchTab("bulletin")'>📄 Bulletin PDF</div>
       {% endif %}
     </div>
 
@@ -1571,6 +1638,29 @@ def settings_page():
         {% else %}
           <p class='muted'>Aucune note enregistrée pour le moment.</p>
         {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- TAB : Bulletin PDF -->
+    {% if user.role in ['eleve', 'parent'] %}
+    <div id='tab-bulletin' class='profile-section'>
+      <div class='card' style='max-width:600px;'>
+        <h2>📄 Télécharger le bulletin</h2>
+        <p class='muted'>Génère un document complet avec toutes tes notes, moyennes par matière et absences. Le fichier s'ouvre dans n'importe quel navigateur et peut être imprimé ou sauvegardé en PDF.</p>
+        <div style='background:var(--admin-box);border:1px solid var(--admin-box-border);border-radius:14px;padding:20px;margin-top:10px;'>
+          <div style='display:flex;align-items:center;gap:14px;flex-wrap:wrap;'>
+            <div style='font-size:48px;'>📋</div>
+            <div>
+              <div style='font-weight:800;font-size:16px;color:var(--text);'>Bulletin scolaire</div>
+              <div class='muted small'>Notes · Moyennes · Absences</div>
+            </div>
+          </div>
+          <a href='{{ url_for("bulletin_pdf") }}' style='display:inline-flex;align-items:center;gap:8px;margin-top:16px;background:linear-gradient(90deg,#1d4ed8,#2563eb);color:white;text-decoration:none;padding:12px 20px;border-radius:12px;font-weight:700;font-size:15px;'>
+            ⬇️ Télécharger le bulletin
+          </a>
+        </div>
+        <p class='muted small' style='margin-top:12px;'>💡 Une fois ouvert dans le navigateur, utilise Ctrl+P (ou Cmd+P sur Mac) pour l'imprimer ou le sauvegarder en PDF.</p>
       </div>
     </div>
     {% endif %}
@@ -1868,6 +1958,28 @@ def dashboard():
 @login_required
 def grades():
     user = g.user
+
+    # Marquer les notes comme vues
+    if user["role"] in ["eleve", "parent"]:
+        try:
+            if user["role"] == "eleve":
+                max_grade = query_one("SELECT MAX(id) AS max_id FROM grades WHERE student_id = ?", (user["id"],))
+            else:
+                children = get_parent_children(user)
+                if children:
+                    child_ids = [c["id"] for c in children]
+                    placeholders = ",".join(["?"] * len(child_ids))
+                    max_grade = query_one(f"SELECT MAX(id) AS max_id FROM grades WHERE student_id IN ({placeholders})", tuple(child_ids))
+                else:
+                    max_grade = None
+            max_id = max_grade["max_id"] if max_grade and max_grade["max_id"] else 0
+            existing = query_one("SELECT id FROM notif_seen WHERE user_id = ?", (user["id"],))
+            if existing:
+                execute_db("UPDATE notif_seen SET last_seen_grade_id = MAX(last_seen_grade_id, ?) WHERE user_id = ?", (max_id, user["id"]))
+            else:
+                execute_db("INSERT INTO notif_seen (user_id, last_seen_message_id, last_seen_grade_id) VALUES (?, 0, ?)", (user["id"], max_id))
+        except Exception:
+            pass
 
     if request.method == "POST":
         form_type = request.form.get("form_type", "").strip()
@@ -2909,6 +3021,18 @@ def init_chat_tables():
 def messages_page():
     init_chat_tables()
     user = g.user
+
+    # Marquer les messages comme vus
+    try:
+        max_msg = query_one("SELECT MAX(id) AS max_id FROM messages WHERE receiver_id = ?", (user["id"],))
+        max_id = max_msg["max_id"] if max_msg and max_msg["max_id"] else 0
+        existing = query_one("SELECT id FROM notif_seen WHERE user_id = ?", (user["id"],))
+        if existing:
+            execute_db("UPDATE notif_seen SET last_seen_message_id = MAX(last_seen_message_id, ?) WHERE user_id = ?", (max_id, user["id"]))
+        else:
+            execute_db("INSERT INTO notif_seen (user_id, last_seen_message_id, last_seen_grade_id) VALUES (?, ?, 0)", (user["id"], max_id))
+    except Exception:
+        pass
 
     # Contacts selon le rôle
     if user["role"] == "eleve":
@@ -4160,6 +4284,145 @@ def admin_panel():
         recent_messages=recent_messages,
         recent_homework=recent_homework,
     )
+
+
+@app.route("/bulletin-pdf")
+@login_required
+def bulletin_pdf():
+    from flask import make_response
+    import io
+    user = g.user
+
+    # Récupérer les données selon le rôle
+    if user["role"] == "eleve":
+        students_data = [user]
+    elif user["role"] == "parent":
+        students_data = get_parent_children(user)
+        if not students_data:
+            flash("Aucun enfant lié à ce compte.")
+            return redirect(url_for("settings_page"))
+    else:
+        flash("Le bulletin PDF est disponible uniquement pour les élèves et parents.")
+        return redirect(url_for("settings_page"))
+
+    # Générer le HTML du bulletin
+    html_parts = []
+    html_parts.append("""<!DOCTYPE html><html lang='fr'><head><meta charset='utf-8'>
+    <style>
+      body { font-family: Arial, sans-serif; color: #1a1a2e; margin: 0; padding: 0; }
+      .page { max-width: 800px; margin: 0 auto; padding: 40px 36px; }
+      .header { text-align:center; border-bottom: 3px solid #1d4ed8; padding-bottom: 20px; margin-bottom: 28px; }
+      .header h1 { color: #1d4ed8; font-size: 26px; margin: 0 0 6px; }
+      .header p { color: #555; margin: 4px 0; font-size: 14px; }
+      .student-name { font-size: 20px; font-weight: 800; color: #0f172a; margin: 24px 0 4px; }
+      .student-meta { color: #555; font-size: 13px; margin-bottom: 18px; }
+      table { width: 100%; border-collapse: collapse; margin-bottom: 28px; }
+      th { background: #1d4ed8; color: white; padding: 10px 12px; text-align: left; font-size: 13px; }
+      td { padding: 9px 12px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
+      tr:nth-child(even) td { background: #f8faff; }
+      .avg-row td { font-weight: 800; background: #eef4ff !important; color: #1d4ed8; }
+      .section-title { font-size: 15px; font-weight: 700; color: #1d4ed8; margin: 20px 0 10px; border-left: 4px solid #1d4ed8; padding-left: 10px; }
+      .absence-badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; }
+      .badge-ok { background:#dcfce7; color:#166534; }
+      .badge-ko { background:#fee2e2; color:#991b1b; }
+      .footer { text-align:center; color:#888; font-size:11px; margin-top:40px; border-top:1px solid #e2e8f0; padding-top:12px; }
+      .general-avg { font-size:28px; font-weight:900; color:#1d4ed8; }
+      .avg-card { background:#eef4ff; border-radius:12px; padding:16px 20px; margin-bottom:20px; display:flex; align-items:center; gap:16px; }
+    </style></head><body><div class='page'>""")
+
+    html_parts.append(f"""
+    <div class='header'>
+      <h1>📋 Bulletin scolaire</h1>
+      <p>Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}</p>
+      <p>Mini Pronote+ — L'École des Roseaux</p>
+    </div>""")
+
+    for student in students_data:
+        # Notes
+        grades_rows = query_all(
+            """
+            SELECT g.value, g.comment, g.created_at, s.name AS subject_name, u.full_name AS teacher_name
+            FROM grades g JOIN subjects s ON s.id = g.subject_id JOIN users u ON u.id = g.teacher_id
+            WHERE g.student_id = ? ORDER BY s.name, g.created_at DESC
+            """,
+            (student["id"],)
+        )
+        # Moyennes par matière
+        averages = query_all(
+            """
+            SELECT s.name AS subject_name, ROUND(CAST(AVG(g.value) AS NUMERIC), 2) AS avg_value, COUNT(*) AS nb
+            FROM grades g JOIN subjects s ON s.id = g.subject_id
+            WHERE g.student_id = ? GROUP BY s.name ORDER BY s.name
+            """,
+            (student["id"],)
+        )
+        # Absences
+        absences = query_all(
+            "SELECT * FROM absences WHERE student_id = ? ORDER BY absence_date DESC",
+            (student["id"],)
+        )
+        # Moyenne générale
+        all_values = [r["value"] for r in grades_rows]
+        gen_avg = round(sum(all_values) / len(all_values), 2) if all_values else None
+
+        class_name = student.get("class_name") or "-"
+        html_parts.append(f"""
+        <div class='student-name'>{student['full_name']}</div>
+        <div class='student-meta'>Classe : {class_name} &nbsp;|&nbsp; {len(grades_rows)} note(s) enregistrée(s) &nbsp;|&nbsp; {len(absences)} absence(s)</div>""")
+
+        if gen_avg is not None:
+            color = "#166534" if gen_avg >= 10 else "#991b1b"
+            html_parts.append(f"""
+            <div class='avg-card'>
+              <div>
+                <div style='font-size:13px;color:#555;'>Moyenne générale</div>
+                <div class='general-avg' style='color:{color};'>{gen_avg}/20</div>
+              </div>
+            </div>""")
+
+        # Tableau moyennes par matière
+        if averages:
+            html_parts.append("<div class='section-title'>Moyennes par matière</div>")
+            html_parts.append("<table><tr><th>Matière</th><th>Moyenne</th><th>Notes</th></tr>")
+            for avg in averages:
+                color = "#166534" if avg["avg_value"] >= 10 else "#991b1b"
+                html_parts.append(f"<tr class='avg-row'><td>{avg['subject_name']}</td><td style='color:{color};font-weight:800;'>{avg['avg_value']}/20</td><td>{avg['nb']} note(s)</td></tr>")
+            html_parts.append("</table>")
+
+        # Tableau détail des notes
+        if grades_rows:
+            html_parts.append("<div class='section-title'>Détail des notes</div>")
+            html_parts.append("<table><tr><th>Matière</th><th>Note</th><th>Professeur</th><th>Commentaire</th><th>Date</th></tr>")
+            for g_row in grades_rows:
+                color = "#166534" if g_row["value"] >= 10 else "#991b1b"
+                html_parts.append(f"<tr><td>{g_row['subject_name']}</td><td style='color:{color};font-weight:700;'>{g_row['value']}/20</td><td>{g_row['teacher_name']}</td><td>{g_row['comment'] or '-'}</td><td>{g_row['created_at'][:10]}</td></tr>")
+            html_parts.append("</table>")
+        else:
+            html_parts.append("<p style='color:#888;'>Aucune note enregistrée.</p>")
+
+        # Absences
+        html_parts.append("<div class='section-title'>Absences</div>")
+        if absences:
+            html_parts.append("<table><tr><th>Date</th><th>Motif</th><th>Statut</th></tr>")
+            for ab in absences:
+                badge_class = "badge-ok" if ab["status"] == "Justifiée" else "badge-ko"
+                html_parts.append(f"<tr><td>{ab['absence_date']}</td><td>{ab.get('reason') or '-'}</td><td><span class='absence-badge {badge_class}'>{ab['status']}</span></td></tr>")
+            html_parts.append("</table>")
+        else:
+            html_parts.append("<p style='color:#166534;font-weight:700;'>✅ Aucune absence enregistrée.</p>")
+
+    html_parts.append(f"""
+    <div class='footer'>Document généré automatiquement par Mini Pronote+ · {datetime.now().strftime('%d/%m/%Y')}</div>
+    </div></body></html>""")
+
+    full_html = "".join(html_parts)
+
+    # Retourner en HTML (téléchargeable comme fichier)
+    response = make_response(full_html)
+    student_name = students_data[0]["full_name"].replace(" ", "_") if students_data else "bulletin"
+    response.headers["Content-Type"] = "text/html; charset=utf-8"
+    response.headers["Content-Disposition"] = f"attachment; filename=bulletin_{student_name}_{datetime.now().strftime('%Y%m%d')}.html"
+    return response
 
 
 @app.after_request
