@@ -928,11 +928,21 @@ BASE_TOP = """
     .nav-right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
     .dark-toggle { width:36px; height:36px; border-radius:50%; background:rgba(255,255,255,0.12); border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:17px; transition:background 0.2s; box-shadow:none; padding:0; }
     .dark-toggle:hover { background:rgba(255,255,255,0.22); transform:none; }
+    .user-pill { display:flex; align-items:center; gap:8px; padding:5px 10px 5px 5px; border-radius:999px; background:rgba(255,255,255,0.1); border:none; cursor:pointer; color:white; font-size:13px; font-weight:600; position:relative; box-shadow:none; }
+    .user-pill:hover { background:rgba(255,255,255,0.18); transform:none; }
+    .user-pill-avatar { width:30px; height:30px; border-radius:50%; object-fit:cover; border:2px solid rgba(255,255,255,0.4); flex-shrink:0; background:#1e40af; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:800; }
+    .user-pill-name { max-width:90px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .user-pill-dropdown { display:none; position:absolute; top:calc(100% + 8px); right:0; background:#1e293b; border:1px solid rgba(255,255,255,0.12); border-radius:14px; min-width:180px; padding:6px; box-shadow:0 16px 40px rgba(0,0,0,0.45); z-index:400; }
+    .user-pill-wrap { position:relative; }
+    .user-pill-wrap:hover .user-pill-dropdown { display:block; }
+    .user-pill-dropdown a { display:flex; align-items:center; gap:9px; color:white; text-decoration:none; padding:10px 12px; border-radius:9px; font-size:13px; font-weight:600; }
+    .user-pill-dropdown a:hover { background:rgba(255,255,255,0.1); }
+    .user-pill-dropdown .sep { height:1px; background:rgba(255,255,255,0.1); margin:4px 0; }
     .burger-btn { width:42px; height:42px; border-radius:11px; border:1px solid rgba(255,255,255,0.25); background:rgba(255,255,255,0.1); display:flex; flex-direction:column; align-items:center; justify-content:center; gap:5px; cursor:pointer; padding:0; transition:background 0.2s; box-shadow:none; }
     .burger-btn:hover { background:rgba(255,255,255,0.2); transform:none; }
     .burger-btn span { display:block; width:20px; height:2px; background:white; border-radius:10px; }
-    .mobile-drawer { display:none; position:fixed; top:0; right:-300px; width:270px; max-width:85vw; height:100vh; background:linear-gradient(180deg,#0f172a,#1e3a8a); padding:0; box-shadow:-8px 0 28px rgba(0,0,0,0.35); z-index:300; transition:right 0.26s cubic-bezier(.4,0,.2,1); overflow-y:auto; flex-direction:column; }
-    .mobile-drawer.open { right:0; }
+    .mobile-drawer { display:flex; flex-direction:column; position:fixed; top:0; right:-310px; width:270px; max-width:88vw; height:100vh; background:linear-gradient(180deg,#0f172a,#1e3a8a); padding:0; box-shadow:-8px 0 28px rgba(0,0,0,0.35); z-index:300; transition:right 0.28s cubic-bezier(.4,0,.2,1); overflow-y:auto; }
+    .mobile-drawer.open { right:0 !important; }
     .mobile-drawer-head { display:flex; justify-content:space-between; align-items:center; padding:18px 16px 12px; border-bottom:1px solid rgba(255,255,255,0.1); }
     .mobile-drawer-head strong { color:white; font-size:17px; }
     .close-drawer { background:rgba(255,255,255,0.1); border:none; color:white; width:34px; height:34px; border-radius:8px; cursor:pointer; font-size:16px; box-shadow:none; padding:0; }
@@ -973,7 +983,6 @@ BASE_TOP = """
     .admin-box { margin-top:14px; padding:14px; border-radius:14px; background:var(--admin-box); border:1px solid var(--admin-box-border); }
     @media (max-width:900px) {
       .two-cols { grid-template-columns:1fr; }
-      .mobile-drawer { display:flex; }
       .container { padding:0 12px; margin:18px auto; }
       .card { padding:18px; border-radius:18px; }
       .hero { padding:20px; border-radius:22px; }
@@ -997,6 +1006,24 @@ NAV = """
   <div class='nav-right'>
     <button class='dark-toggle' onclick='toggleDark()'>🌙</button>
     {% if session.get('user_id') %}
+    <!-- User pill with dropdown -->
+    <div class='user-pill-wrap'>
+      <button class='user-pill'>
+        {% if g.user and g.user.profile_picture_url %}
+          <img src='{{ g.user.profile_picture_url }}' class='user-pill-avatar'>
+        {% else %}
+          <div class='user-pill-avatar'>{{ session.get('full_name','?')[:1] }}</div>
+        {% endif %}
+        <span class='user-pill-name'>{{ session.get('full_name','').split()[0] }}</span>
+        <span style='opacity:0.6;font-size:11px;'>▾</span>
+      </button>
+      <div class='user-pill-dropdown'>
+        <a href='{{ url_for("settings_page") }}'>⚙️ Paramètres</a>
+        <div class='sep'></div>
+        <a href='{{ url_for("logout") }}' style='color:#f87171;'>🚪 Déconnexion</a>
+      </div>
+    </div>
+    <!-- Burger -->
     <button class='burger-btn' onclick='openDrawer()' title='Menu'>
       <span></span><span></span><span></span>
     </button>
@@ -1058,8 +1085,16 @@ NAV = """
 </div>
 {% endif %}
 <script>
-function openDrawer(){document.getElementById('mobileDrawer').classList.add('open');document.getElementById('mobileOverlay').classList.add('show');document.body.style.overflow='hidden';}
-function closeDrawer(){document.getElementById('mobileDrawer').classList.remove('open');document.getElementById('mobileOverlay').classList.remove('show');document.body.style.overflow='';}
+function openDrawer(){
+  document.getElementById('mobileDrawer').classList.add('open');
+  document.getElementById('mobileOverlay').classList.add('show');
+  document.body.style.overflow='hidden';
+}
+function closeDrawer(){
+  document.getElementById('mobileDrawer').classList.remove('open');
+  document.getElementById('mobileOverlay').classList.remove('show');
+  document.body.style.overflow='';
+}
 function toggleDark(){
   var next=document.documentElement.getAttribute('data-theme')=='dark'?'light':'dark';
   document.documentElement.setAttribute('data-theme',next);
