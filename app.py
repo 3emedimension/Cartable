@@ -706,6 +706,31 @@ def init_db():
             [("Mathématiques",), ("Français",), ("Histoire",), ("Anglais",), ("SVT",), ("Physique",)],
         )
 
+    # Table suivi devoirs
+    if not table_exists("homework_done"):
+        if USE_POSTGRES:
+            execute_db("""
+                CREATE TABLE IF NOT EXISTS homework_done (
+                    id SERIAL PRIMARY KEY,
+                    homework_id INTEGER NOT NULL REFERENCES homework(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    done_at TEXT NOT NULL,
+                    UNIQUE(homework_id, user_id)
+                )
+            """)
+        else:
+            execute_db("""
+                CREATE TABLE IF NOT EXISTS homework_done (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    homework_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    done_at TEXT NOT NULL,
+                    UNIQUE(homework_id, user_id),
+                    FOREIGN KEY(homework_id) REFERENCES homework(id),
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )
+            """)
+
     admin_hash = generate_password_hash(ADMIN_DEFAULT_PASSWORD)
     admin_user = query_one("SELECT id FROM users WHERE username = ?", ("admin",))
     if not admin_user:
@@ -1235,37 +1260,72 @@ def profile_page():
     user = g.user
 
     if request.method == "POST":
-        uploaded = request.files.get("profile_picture")
+        form_type = request.form.get("form_type", "photo")
 
-        if not uploaded or not uploaded.filename:
-            flash("Choisis une image.")
+        # --- Changement photo ---
+        if form_type == "photo":
+            uploaded = request.files.get("profile_picture")
+            if not uploaded or not uploaded.filename:
+                flash("Choisis une image.")
+                return redirect(url_for("profile_page"))
+            if not allowed_profile_image(uploaded.filename):
+                flash("Format image non autorisé.")
+                return redirect(url_for("profile_page"))
+            old_user = query_one("SELECT profile_picture FROM users WHERE id = ?", (user["id"],))
+            if old_user and old_user.get("profile_picture"):
+                delete_from_cloudinary(old_user["profile_picture"], resource_type="image")
+            public_id, secure_url = upload_to_cloudinary(uploaded, folder="pronote_profiles", resource_type="image")
+            if not public_id or not secure_url:
+                flash("Impossible d'enregistrer la photo de profil.")
+                return redirect(url_for("profile_page"))
+            execute_db(
+                "UPDATE users SET profile_picture = ?, profile_picture_url = ? WHERE id = ?",
+                (public_id, secure_url, user["id"]),
+            )
+            log_event("Photo de profil mise à jour", user=user, entity_type="user", entity_id=user["id"])
+            flash("Photo de profil mise à jour.")
             return redirect(url_for("profile_page"))
 
-        if not allowed_profile_image(uploaded.filename):
-            flash("Format image non autorisé.")
+        # --- Modification infos personnelles ---
+        elif form_type == "edit_info":
+            new_full_name = request.form.get("full_name", "").strip()
+            new_username = request.form.get("username", "").strip()
+            new_password = request.form.get("new_password", "").strip()
+            confirm_password = request.form.get("confirm_password", "").strip()
+
+            if not new_full_name or not new_username:
+                flash("Le nom et le nom d'utilisateur sont obligatoires.")
+                return redirect(url_for("profile_page"))
+
+            # Vérifier que le username n'est pas déjà pris par quelqu'un d'autre
+            existing = query_one("SELECT id FROM users WHERE username = ? AND id != ?", (new_username, user["id"]))
+            if existing:
+                flash("Ce nom d'utilisateur est déjà utilisé.")
+                return redirect(url_for("profile_page"))
+
+            if new_password:
+                if len(new_password) < 6:
+                    flash("Le mot de passe doit faire au moins 6 caractères.")
+                    return redirect(url_for("profile_page"))
+                if new_password != confirm_password:
+                    flash("Les deux mots de passe ne correspondent pas.")
+                    return redirect(url_for("profile_page"))
+                execute_db(
+                    "UPDATE users SET full_name = ?, username = ?, password = ? WHERE id = ?",
+                    (new_full_name, new_username, generate_password_hash(new_password), user["id"]),
+                )
+            else:
+                execute_db(
+                    "UPDATE users SET full_name = ?, username = ? WHERE id = ?",
+                    (new_full_name, new_username, user["id"]),
+                )
+
+            # Mettre à jour la session
+            session["full_name"] = new_full_name
+            session["username"] = new_username
+            log_event("Profil modifié", user=user, details=f"Nouveau nom: {new_full_name}", entity_type="user", entity_id=user["id"])
+            flash("Profil mis à jour avec succès.")
             return redirect(url_for("profile_page"))
-
-        old_user = query_one("SELECT profile_picture FROM users WHERE id = ?", (user["id"],))
-        if old_user and old_user.get("profile_picture"):
-            delete_from_cloudinary(old_user["profile_picture"], resource_type="image")
-
-        public_id, secure_url = upload_to_cloudinary(
-            uploaded,
-            folder="pronote_profiles",
-            resource_type="image"
-        )
-
-        if not public_id or not secure_url:
-            flash("Impossible d'enregistrer la photo de profil.")
-            return redirect(url_for("profile_page"))
-
-        execute_db(
-            "UPDATE users SET profile_picture = ?, profile_picture_url = ? WHERE id = ?",
-            (public_id, secure_url, user["id"]),
-        )
-        log_event("Photo de profil mise à jour", user=user, details="Nouvelle photo de profil", entity_type="user", entity_id=user["id"])
-        flash("Photo de profil mise à jour.")
-        return redirect(url_for("profile_page"))
 
     refreshed_user = query_one(
         """
@@ -1277,31 +1337,182 @@ def profile_page():
         (user["id"],),
     )
 
+    # Courbe des notes pour élève et parent
+    grades_chart_data = []
+    if refreshed_user["role"] == "eleve":
+        grades_chart_data = query_all(
+            """
+            SELECT g.value, g.created_at, s.name AS subject_name
+            FROM grades g JOIN subjects s ON s.id = g.subject_id
+            WHERE g.student_id = ?
+            ORDER BY g.created_at ASC
+            """,
+            (user["id"],),
+        )
+    elif refreshed_user["role"] == "parent":
+        children = get_parent_children(refreshed_user)
+        if children:
+            child_ids = [c["id"] for c in children]
+            placeholders = ",".join(["?"] * len(child_ids))
+            grades_chart_data = query_all(
+                f"""
+                SELECT g.value, g.created_at, s.name AS subject_name, u.full_name AS student_name
+                FROM grades g JOIN subjects s ON s.id = g.subject_id JOIN users u ON u.id = g.student_id
+                WHERE g.student_id IN ({placeholders})
+                ORDER BY u.full_name, g.created_at ASC
+                """,
+                tuple(child_ids),
+            )
+
     content = """
-    <div class='grid'>
-      <div class='card' style='text-align:center;'>
-        {% if user.profile_picture_url %}
-          <img src='{{ user.profile_picture_url }}' class='avatar-large' alt='Photo de profil'>
-        {% else %}
-          <div class='avatar-large' style='display:inline-flex; align-items:center; justify-content:center; color:#1d4ed8; font-size:34px; font-weight:800;'>
-            {{ user.full_name[:1] }}
-          </div>
-        {% endif %}
-        <h1 style='margin-top:16px;'>{{ user.full_name }}</h1>
-        <p class='muted'>@{{ user.username }} · {{ user.role }}{% if user.class_name %} · {{ user.class_name }}{% endif %}</p>
+    <style>
+      .profile-tabs { display:flex; gap:10px; margin-bottom:20px; flex-wrap:wrap; }
+      .profile-tab { padding:10px 20px; border-radius:12px; cursor:pointer; font-weight:700; border:2px solid #dbeafe; background:#f0f7ff; color:#1d4ed8; transition:0.2s; }
+      .profile-tab.active { background:linear-gradient(90deg,#1d4ed8,#2563eb); color:white; border-color:transparent; }
+      .profile-section { display:none; }
+      .profile-section.active { display:block; }
+      .chart-container { position:relative; height:300px; width:100%; }
+    </style>
+
+    <div class='hero' style='display:flex; align-items:center; gap:22px; flex-wrap:wrap;'>
+      {% if user.profile_picture_url %}
+        <img src='{{ user.profile_picture_url }}' class='avatar-large' alt='Photo de profil' style='border:4px solid rgba(255,255,255,0.8);'>
+      {% else %}
+        <div class='avatar-large' style='display:inline-flex; align-items:center; justify-content:center; font-size:38px; font-weight:800;'>
+          {{ user.full_name[:1] }}
+        </div>
+      {% endif %}
+      <div>
+        <h1 style='margin-bottom:6px;'>{{ user.full_name }}</h1>
+        <p style='opacity:0.9; margin:0;'>@{{ user.username }} · {{ user.role }}{% if user.class_name %} · {{ user.class_name }}{% endif %}</p>
       </div>
-      <div class='card'>
+    </div>
+
+    <div class='profile-tabs'>
+      <div class='profile-tab active' onclick='switchTab("info")'>📝 Mes infos</div>
+      <div class='profile-tab' onclick='switchTab("photo")'>🖼️ Photo de profil</div>
+      {% if user.role in ['eleve', 'parent'] %}
+      <div class='profile-tab' onclick='switchTab("courbe")'>📈 Courbe des notes</div>
+      {% endif %}
+    </div>
+
+    <!-- TAB : Infos personnelles -->
+    <div id='tab-info' class='profile-section active'>
+      <div class='card' style='max-width:600px;'>
+        <h2>Modifier mes informations</h2>
+        <form method='post'>
+          <input type='hidden' name='form_type' value='edit_info'>
+          <label>Nom complet</label>
+          <input name='full_name' value='{{ user.full_name }}' required>
+          <label>Nom d'utilisateur</label>
+          <input name='username' value='{{ user.username }}' required autocomplete='off'>
+          <label>Nouveau mot de passe <span class='muted small'>(laisser vide pour ne pas changer)</span></label>
+          <input type='password' name='new_password' autocomplete='new-password' placeholder='Minimum 6 caractères'>
+          <label>Confirmer le nouveau mot de passe</label>
+          <input type='password' name='confirm_password' autocomplete='new-password'>
+          <button type='submit'>Enregistrer les modifications</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- TAB : Photo -->
+    <div id='tab-photo' class='profile-section'>
+      <div class='card' style='max-width:600px;'>
         <h2>Changer la photo de profil</h2>
         <form method='post' enctype='multipart/form-data'>
+          <input type='hidden' name='form_type' value='photo'>
           <label>Choisir une image</label>
           <input type='file' name='profile_picture' accept='image/*' required>
-          <button type='submit'>Mettre à jour</button>
+          <button type='submit'>Mettre à jour la photo</button>
         </form>
         <p class='muted small'>Formats autorisés : png, jpg, jpeg, gif, webp</p>
       </div>
     </div>
+
+    <!-- TAB : Courbe des notes -->
+    {% if user.role in ['eleve', 'parent'] %}
+    <div id='tab-courbe' class='profile-section'>
+      <div class='card'>
+        <h2>📈 Évolution des notes dans le temps</h2>
+        {% if grades_chart_data %}
+          <div class='chart-container'>
+            <canvas id='gradesChart'></canvas>
+          </div>
+          <script src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js'></script>
+          <script>
+            const rawData = {{ grades_chart_data_json }};
+            const colors = ['#2563eb','#10b981','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899','#84cc16'];
+
+            // Grouper par matière (ou par élève+matière pour parent)
+            const groups = {};
+            rawData.forEach(d => {
+              const key = d.student_name ? d.student_name + ' - ' + d.subject_name : d.subject_name;
+              if (!groups[key]) groups[key] = [];
+              groups[key].push({ x: d.created_at.substring(0,10), y: d.value });
+            });
+
+            const datasets = Object.entries(groups).map(([label, data], i) => ({
+              label,
+              data,
+              borderColor: colors[i % colors.length],
+              backgroundColor: colors[i % colors.length] + '22',
+              tension: 0.3,
+              pointRadius: 5,
+              pointHoverRadius: 7,
+              fill: false,
+              borderWidth: 2.5,
+            }));
+
+            new Chart(document.getElementById('gradesChart'), {
+              type: 'line',
+              data: { datasets },
+              options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                scales: {
+                  x: {
+                    type: 'category',
+                    title: { display: true, text: 'Date' },
+                    ticks: { maxRotation: 45, font: { size: 12 } }
+                  },
+                  y: {
+                    min: 0, max: 20,
+                    title: { display: true, text: 'Note /20' },
+                    ticks: { stepSize: 2 }
+                  }
+                },
+                plugins: {
+                  legend: { position: 'bottom', labels: { font: { size: 13 }, padding: 16 } },
+                  tooltip: {
+                    callbacks: {
+                      label: ctx => ctx.dataset.label + ' : ' + ctx.parsed.y + '/20'
+                    }
+                  }
+                }
+              }
+            });
+          </script>
+        {% else %}
+          <p class='muted'>Aucune note enregistrée pour le moment.</p>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+
+    <script>
+      function switchTab(name) {
+        document.querySelectorAll('.profile-section').forEach(s => s.classList.remove('active'));
+        document.querySelectorAll('.profile-tab').forEach(t => t.classList.remove('active'));
+        document.getElementById('tab-' + name).classList.add('active');
+        event.target.classList.add('active');
+      }
+    </script>
     """
-    return render_page(content, title="Profil", user=refreshed_user)
+
+    import json
+    grades_chart_data_json = json.dumps([dict(r) for r in grades_chart_data])
+    return render_page(content, title="Profil", user=refreshed_user, grades_chart_data=grades_chart_data, grades_chart_data_json=grades_chart_data_json)
 
 
 # =========================
@@ -1949,6 +2160,24 @@ def homework_page():
             flash("Devoir supprimé.")
             return redirect(url_for("homework_page"))
 
+        elif form_type == "toggle_done":
+            homework_id = request.form.get("homework_id")
+            already = query_one(
+                "SELECT id FROM homework_done WHERE homework_id = ? AND user_id = ?",
+                (homework_id, user["id"])
+            )
+            if already:
+                execute_db("DELETE FROM homework_done WHERE homework_id = ? AND user_id = ?", (homework_id, user["id"]))
+            else:
+                try:
+                    execute_db(
+                        "INSERT INTO homework_done (homework_id, user_id, done_at) VALUES (?, ?, ?)",
+                        (homework_id, user["id"], current_timestamp())
+                    )
+                except Exception:
+                    pass
+            return redirect(url_for("homework_page"))
+
     if user["role"] == "eleve":
         target_class_ids = [user["class_id"]] if user.get("class_id") else []
     elif user["role"] == "parent":
@@ -2021,6 +2250,22 @@ def homework_page():
             {% if item.attachment_url %}
               <p><a href='{{ item.attachment_url }}' target='_blank'>📎 Télécharger : {{ item.attachment_name or 'pièce jointe' }}</a></p>
             {% endif %}
+            {% if user.role in ['eleve', 'parent'] %}
+              <form method='post' style='margin-top:10px;'>
+                <input type='hidden' name='form_type' value='toggle_done'>
+                <input type='hidden' name='homework_id' value='{{ item.id }}'>
+                {% if item.id in done_ids %}
+                  <button type='submit' style='background:linear-gradient(90deg,#059669,#10b981);'>✅ Marqué comme fait — Annuler</button>
+                {% else %}
+                  <button type='submit' style='background:linear-gradient(90deg,#475569,#64748b);'>☐ Marquer comme fait</button>
+                {% endif %}
+              </form>
+            {% endif %}
+            {% if user.role in ['prof', 'admin'] %}
+              <p class='muted small' style='margin-top:8px;'>
+                ✅ {{ completion_stats.get(item.id, 0) }} / {{ total_students }} élève(s) ont marqué ce devoir comme fait
+              </p>
+            {% endif %}
             {% if user.role == 'admin' %}
             <div class='admin-box'>
               <form method='post' enctype='multipart/form-data'>
@@ -2058,7 +2303,32 @@ def homework_page():
       </div>
     </div>
     """
-    return render_page(content, title="Devoirs", user=user, items=items, subjects=subjects, classes=classes)
+    # IDs des devoirs cochés par l'utilisateur courant
+    done_ids = set()
+    if user["role"] in ["eleve", "parent"]:
+        done_rows = query_all(
+            "SELECT homework_id FROM homework_done WHERE user_id = ?",
+            (user["id"],)
+        )
+        done_ids = {r["homework_id"] for r in done_rows}
+
+    # Stats de completion par devoir pour profs/admin
+    completion_stats = {}
+    if user["role"] in ["prof", "admin"]:
+        stats_rows = query_all(
+            """
+            SELECT hd.homework_id, COUNT(*) AS done_count
+            FROM homework_done hd
+            GROUP BY hd.homework_id
+            """
+        )
+        completion_stats = {r["homework_id"]: r["done_count"] for r in stats_rows}
+        # Nombre total d'élèves
+        total_students = query_one("SELECT COUNT(*) AS total FROM users WHERE role = 'eleve'")["total"]
+    else:
+        total_students = 0
+
+    return render_page(content, title="Devoirs", user=user, items=items, subjects=subjects, classes=classes, done_ids=done_ids, completion_stats=completion_stats, total_students=total_students)
 
 
 # =========================
