@@ -1860,7 +1860,7 @@ def general_info_page():
     <div class='grid'>
       {% if user.role in ['prof', 'admin'] %}
       <div class='card'>
-        <h2>Publier une information</h2>
+        <h2 style='background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>📢 Publier une information</h2>
         <form method='post'>
           <input type='hidden' name='form_type' value='create'>
           <label>Titre</label><input name='title' required>
@@ -1870,7 +1870,10 @@ def general_info_page():
       </div>
       {% endif %}
       <div class='card'>
-        <h1>Info général</h1>
+        <div style='display:flex;align-items:center;gap:10px;margin-bottom:16px;'>
+          <span style='font-size:28px;'>📢</span>
+          <h1 style='margin:0;background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>Info général</h1>
+        </div>
         {% for info in infos %}
           <div class='info-box'>
             <strong>{{ info.title }}</strong>
@@ -2002,14 +2005,18 @@ def dashboard():
       </div>
     </div>
     <div class='grid'>
+      {% set stat_colors = ['linear-gradient(135deg,#1d4ed8,#38bdf8)','linear-gradient(135deg,#10b981,#06b6d4)','linear-gradient(135deg,#f59e0b,#ef4444)','linear-gradient(135deg,#8b5cf6,#ec4899)'] %}
       {% for key, value in stats.items() %}
-        <div class='card'><h3>{{ key }}</h3><p class='metric'>{{ value }}</p></div>
+        <div class='card' style='border-top:4px solid transparent;border-image:{{ stat_colors[loop.index0 % 4] }};border-image-slice:1;'>
+          <h3 style='color:var(--text-muted);font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;'>{{ key }}</h3>
+          <p class='metric' style='background:{{ stat_colors[loop.index0 % 4] }};-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>{{ value }}</p>
+        </div>
       {% endfor %}
     </div>
     <div class='grid' style='margin-top:18px;'>
 
       <div class='card'>
-        <h2>Derniers messages</h2>
+        <h2 style='background:linear-gradient(135deg,#1d4ed8,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>💬 Derniers messages</h2>
         {% for m in latest_messages %}
           <div style='padding:10px 0; border-bottom:1px solid #eef3fb;'>
             <strong>{{ m.subject }}</strong><br>
@@ -2050,7 +2057,7 @@ def dashboard():
     </div>
 
     <div class='card' style='margin-top:18px;'>
-      <h2>Infos générales récentes</h2>
+      <h2 style='background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>📢 Infos générales récentes</h2>
       {% for info in general_infos %}
         <div class='info-box'>
           <strong>{{ info.title }}</strong>
@@ -2233,6 +2240,10 @@ def grades():
         show_student_col = True
 
     content = """
+    <div style='background:linear-gradient(135deg,#1d4ed8,#38bdf8);color:white;border-radius:22px;padding:22px 26px;margin-bottom:20px;box-shadow:0 12px 28px rgba(29,78,216,0.2);display:flex;align-items:center;gap:14px;'>
+      <span style='font-size:36px;'>📊</span>
+      <div><h1 style='margin:0;color:white;font-size:22px;'>Notes</h1><p style='margin:4px 0 0;opacity:0.85;font-size:13px;'>Toutes tes notes et moyennes par matière</p></div>
+    </div>
     <div class='two-cols'>
       <div class='card'>
         <h1>Notes</h1>
@@ -2323,7 +2334,10 @@ def add_grade():
 
     content = """
     <div class='card' style='max-width:760px; margin:auto;'>
-      <h1>Ajouter une note</h1>
+      <div style='display:flex;align-items:center;gap:10px;margin-bottom:16px;'>
+        <span style='font-size:28px;'>➕</span>
+        <h1 style='margin:0;background:linear-gradient(135deg,#1d4ed8,#38bdf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>Ajouter une note</h1>
+      </div>
       <form method='post'>
         <label>Élève</label>
         <select name='student_id' required>{% for s in students %}<option value='{{ s.id }}'>{{ s.full_name }}{% if s.class_name %} - {{ s.class_name }}{% endif %}</option>{% endfor %}</select>
@@ -2541,8 +2555,8 @@ def homework_page():
     content = """
     <div class='grid'>
       {% if user.role in ['prof', 'admin'] %}
-      <div class='card'>
-        <h2>Ajouter un devoir</h2>
+      <div class='card' style='border-top:4px solid #f59e0b;'>
+        <h2 style='background:linear-gradient(135deg,#f59e0b,#ef4444);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>📝 Ajouter un devoir</h2>
         <form method='post' enctype='multipart/form-data'>
           <input type='hidden' name='form_type' value='create'>
           <label>Classe</label>
@@ -2557,8 +2571,11 @@ def homework_page():
         </form>
       </div>
       {% endif %}
-      <div class='card'>
-        <h1>Devoirs</h1>
+      <div class='card' style='border-top:4px solid #f59e0b;'>
+        <div style='display:flex;align-items:center;gap:10px;margin-bottom:16px;'>
+          <span style='font-size:28px;'>📚</span>
+          <h1 style='margin:0;background:linear-gradient(135deg,#f59e0b,#ef4444);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>Devoirs</h1>
+        </div>
         {% for item in items %}
           <div style='border:1px solid #e5ebf5; border-radius:16px; padding:16px; margin-bottom:14px;'>
             <div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>
@@ -2989,7 +3006,7 @@ def absences_page():
     <div class='grid'>
       {% if user.role in ['prof', 'admin'] %}
       <div class='card'>
-        <h2>Ajouter une absence</h2>
+        <h2 style='background:linear-gradient(135deg,#ef4444,#f97316);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>➕ Ajouter une absence</h2>
         <form method='post'>
           <input type='hidden' name='form_type' value='create'>
           <label>Élève</label>
@@ -3014,7 +3031,10 @@ def absences_page():
       </div>
       {% endif %}
       <div class='card'>
-        <h1>Absences</h1>
+        <div style='display:flex;align-items:center;gap:10px;margin-bottom:16px;'>
+          <span style='font-size:28px;'>📋</span>
+          <h1 style='margin:0;background:linear-gradient(135deg,#ef4444,#f97316);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>Absences</h1>
+        </div>
         <table>
           <thead>
             <tr>
@@ -3571,7 +3591,7 @@ def messages_page():
   <!-- SIDEBAR -->
   <div class='wa-sidebar'>
     <div class='wa-sidebar-header'>
-      <h2>💬 Messagerie</h2>
+      <h2 style='margin:0;background:linear-gradient(135deg,#1d4ed8,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>💬 Messagerie</h2>
       {% if user.role in ['admin', 'prof'] %}
       <button class='wa-new-group-btn' onclick="document.getElementById('groupModal').classList.add('show')">
         <svg viewBox='0 0 24 24' width='16' height='16' fill='white'><path d='M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z'/></svg>
@@ -3929,7 +3949,10 @@ def manage_users():
     content = """
     <div class='grid'>
       <div class='card'>
-        <h1>Créer un compte</h1>
+        <div style='display:flex;align-items:center;gap:10px;margin-bottom:16px;'>
+          <span style='font-size:28px;'>👥</span>
+          <h1 style='margin:0;background:linear-gradient(135deg,#6366f1,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>Créer un compte</h1>
+        </div>
         <form method='post' autocomplete='off'>
           <input type='hidden' name='form_type' value='create'>
           <label>Nom complet</label><input name='full_name' required>
@@ -4147,7 +4170,10 @@ def signalement_page():
     content = """
     <div class='grid'>
       <div class='card'>
-        <h1>Signaler un problème</h1>
+        <div style='display:flex;align-items:center;gap:10px;margin-bottom:16px;'>
+          <span style='font-size:28px;'>🚨</span>
+          <h1 style='margin:0;background:linear-gradient(135deg,#ef4444,#dc2626);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>Signaler un problème</h1>
+        </div>
         <p class='muted'>Explique le bug, le problème ou l'amélioration que tu veux proposer. Les autres utilisateurs ne voient pas les signalements.</p>
         <form method='post'>
           <label>Décris le problème</label>
@@ -4256,14 +4282,14 @@ def admin_panel():
     </div>
 
     <div class='grid' style='margin-top:18px;'>
-      <div class='card'><div class='muted small'>Utilisateurs</div><div class='metric'>{{ totals.users }}</div></div>
-      <div class='card'><div class='muted small'>Élèves</div><div class='metric'>{{ totals.eleves }}</div></div>
-      <div class='card'><div class='muted small'>Profs</div><div class='metric'>{{ totals.profs }}</div></div>
-      <div class='card'><div class='muted small'>Parents</div><div class='metric'>{{ totals.parents }}</div></div>
-      <div class='card'><div class='muted small'>Signalements</div><div class='metric'>{{ totals.reports }}</div></div>
-      <div class='card'><div class='muted small'>Signalements ouverts</div><div class='metric'>{{ totals.reports_open }}</div></div>
-      <div class='card'><div class='muted small'>Messages</div><div class='metric'>{{ totals.messages }}</div></div>
-      <div class='card'><div class='muted small'>Connexions totales</div><div class='metric'>{{ totals.logins_total }}</div></div>
+      <div class='card' style='border-top:4px solid #1d4ed8;'><div class='muted small'>👤 Utilisateurs</div><div class='metric' style='color:#1d4ed8;'>{{ totals.users }}</div></div>
+      <div class='card' style='border-top:4px solid #10b981;'><div class='muted small'>🎒 Élèves</div><div class='metric' style='color:#10b981;'>{{ totals.eleves }}</div></div>
+      <div class='card' style='border-top:4px solid #6366f1;'><div class='muted small'>👨‍🏫 Profs</div><div class='metric' style='color:#6366f1;'>{{ totals.profs }}</div></div>
+      <div class='card' style='border-top:4px solid #f59e0b;'><div class='muted small'>👨‍👩‍👧 Parents</div><div class='metric' style='color:#f59e0b;'>{{ totals.parents }}</div></div>
+      <div class='card' style='border-top:4px solid #ef4444;'><div class='muted small'>🚨 Signalements</div><div class='metric' style='color:#ef4444;'>{{ totals.reports }}</div></div>
+      <div class='card' style='border-top:4px solid #dc2626;'><div class='muted small'>🔴 Ouverts</div><div class='metric' style='color:#dc2626;'>{{ totals.reports_open }}</div></div>
+      <div class='card' style='border-top:4px solid #06b6d4;'><div class='muted small'>💬 Messages</div><div class='metric' style='color:#06b6d4;'>{{ totals.messages }}</div></div>
+      <div class='card' style='border-top:4px solid #8b5cf6;'><div class='muted small'>🔑 Connexions</div><div class='metric' style='color:#8b5cf6;'>{{ totals.logins_total }}</div></div>
     </div>
 
     <div class='grid' style='margin-top:18px;'>
@@ -4331,7 +4357,7 @@ def admin_panel():
         </table>
       </div>
       <div class='card'>
-        <h2>Activité récente du site</h2>
+        <h2 style='background:linear-gradient(135deg,#6366f1,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>⚡ Activité récente</h2>
         <div style='max-height:480px; overflow-y:auto; padding-right:6px;'>
           {% for log in recent_logs %}
             <div style='border:1px solid var(--table-border); border-radius:12px; padding:10px 12px; margin-bottom:8px; background:var(--table-bg);'>
@@ -4375,7 +4401,7 @@ def admin_panel():
     </div>
 
     <div class='card' style='margin-top:18px;'>
-      <h2>Signalements reçus</h2>
+      <h2 style='background:linear-gradient(135deg,#ef4444,#f97316);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;'>🚨 Signalements reçus</h2>
       {% for report in recent_reports %}
         <div style='border:1px solid #e6edf8; border-radius:16px; padding:16px; margin-bottom:14px;'>
           <div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>
