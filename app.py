@@ -4247,18 +4247,20 @@ def admin_panel():
       </div>
       <div class='card'>
         <h2>Activité récente du site</h2>
-        {% for log in recent_logs %}
-          <div style='border:1px solid #e6edf8; border-radius:14px; padding:12px; margin-bottom:10px;'>
-            <div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>
-              <strong>{{ log.action }}</strong>
-              <span class='muted small'>{{ log.created_at }}</span>
+        <div style='max-height:480px; overflow-y:auto; padding-right:6px;'>
+          {% for log in recent_logs %}
+            <div style='border:1px solid var(--table-border); border-radius:12px; padding:10px 12px; margin-bottom:8px; background:var(--table-bg);'>
+              <div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>
+                <strong style='font-size:14px;'>{{ log.action }}</strong>
+                <span class='muted small'>{{ log.created_at }}</span>
+              </div>
+              <div class='muted small' style='margin-top:4px;'>{{ log.username or 'Système' }}{% if log.role %} · {{ log.role }}{% endif %}</div>
+              {% if log.details %}<p style='margin:6px 0 0; font-size:13px; color:var(--text-muted);'>{{ log.details }}</p>{% endif %}
             </div>
-            <div class='muted small' style='margin-top:6px;'>{{ log.username or 'Système' }}{% if log.role %} · {{ log.role }}{% endif %}</div>
-            {% if log.details %}<p style='margin:8px 0 0;'>{{ log.details }}</p>{% endif %}
-          </div>
-        {% else %}
-          <p class='muted'>Aucune activité enregistrée.</p>
-        {% endfor %}
+          {% else %}
+            <p class='muted'>Aucune activité enregistrée.</p>
+          {% endfor %}
+        </div>
       </div>
     </div>
 
