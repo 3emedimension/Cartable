@@ -1,15 +1,27 @@
-name: Keep Render Alive
+name: Keep Renote Alive
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch:
+    - cron: "*/4 * * * *"  # Toutes les 4 minutes
+  workflow_dispatch:        # Lancement manuel possible
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping website
+      - name: Ping Renote
         run: |
-          curl -I https://renote-fr.onrender.com/site-access
-          curl -I https://renote-fr.onrender.com/site-access
+          echo "Ping 1..."
+          curl -s -o /dev/null -w "Status: %{http_code} | Time: %{time_total}s\n" https://renote-fr.onrender.com/site-access
+          
+          sleep 10
+          
+          echo "Ping 2..."
+          curl -s -o /dev/null -w "Status: %{http_code} | Time: %{time_total}s\n" https://renote-fr.onrender.com/site-access
+          
+          sleep 10
+          
+          echo "Ping 3..."
+          curl -s -o /dev/null -w "Status: %{http_code} | Time: %{time_total}s\n" https://renote-fr.onrender.com/
+          
+          echo "Renote est bien réveillé ✅"
