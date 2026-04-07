@@ -5115,9 +5115,29 @@ def add_no_cache_headers(response):
     return response
 
 
+import time
+
+def init_db_with_retry(retries=10, delay=3):
+    """Tente init_db plusieurs fois pour attendre que PostgreSQL soit prêt."""
+    for attempt in range(1, retries + 1):
+        try:
+            init_db()
+            print(f"Base de données initialisée avec succès (tentative {attempt}).")
+            return
+        except Exception as e:
+            print(f"Tentative {attempt}/{retries} échouée : {e}")
+            if attempt < retries:
+                time.sleep(delay)
+            else:
+                print("Impossible de se connecter à la base après plusieurs tentatives.")
+                raise
+
 with app.app_context():
-    init_db()
-    log_event("Application démarrée", user=None, details=f"Démarrage du site sur le port {os.environ.get('PORT', '5000')}", entity_type="system")
+    init_db_with_retry()
+    try:
+        log_event("Application démarrée", user=None, details=f"Démarrage du site sur le port {os.environ.get('PORT', '5000')}", entity_type="system")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
